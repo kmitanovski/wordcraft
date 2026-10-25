@@ -1,6 +1,6 @@
 # UI parity with Microsoft Word
 
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (Document tabs, explicit New Window and document-bound safety) · **Target:** Microsoft Word (Microsoft 365) for Mac 16.113.4
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (Document tabs interrupted-Quit retry protection) · **Target:** Microsoft Word (Microsoft 365) for Mac 16.113.4
 
 Recovery discovery no longer interrupts an explicitly created or opened document. Older copies remain in File › Recover, whose buttons use the interface palette. See [local recovery](recovery.md).
 
@@ -80,6 +80,9 @@ Footnote and endnote editing keeps body and note text at normal opacity, on ligh
 
 ## Document tabs
 
+A forced automation close during Quit cancels that review; subsequent close operations
+prompt for all remaining dirty tabs again, including previously reviewed documents.
+
 The strip above the ribbon selects, pins, reorders and closes documents. Each tab keeps
 its session, undo/redo, selection, zoom, scroll offset, protection, comment drafts and
 AutoSave authority. Names, selection, unsaved status and close controls have accessibility
@@ -92,6 +95,7 @@ unsaved tabs. See [document-tabs.md](document-tabs.md) for commands, safety and 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | Browser picker ownership, Quit retries, dictionary persistence, effective proofing language and keyboard recording regressions fixed after review. Readiness estimates unchanged. |
 | 2026-10-26 | minor | Document tabs, explicit New Window and document-bound safety. See [document-tabs.md](document-tabs.md). |
 | 2026-10-25 | trivial | Custom Document Properties dialog: File › Info › Properties › Advanced Properties… opens it; the document's custom properties listed with Add, Modify and Delete over a name/value form (text properties only; Word's number/date/yes-no types not offered), OK one undoable `file.properties` step, Cancel discards; modal dialogs 62 → 63 (#2982) |
 | 2026-10-25 | trivial | Text Highlight Color shows the remembered colour on the ribbon and mini-toolbar buttons; No Color leaves the pen without a misleading yellow bar (#4087) |

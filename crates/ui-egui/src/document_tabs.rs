@@ -327,6 +327,10 @@ impl WordApp {
             }
         }
         self.confirmed_saves.remove(&self.session.document_id());
+        // An explicit close supersedes Quit review; remaining dirty tabs need a fresh review.
+        if self.closing_all {
+            self.cancel_close_sequence();
+        }
         self.dialog = None;
         self.colors = None;
         self.session.dirty = false;
@@ -520,6 +524,8 @@ fn copy_preferences(from: &Session, to: &mut Session) {
     to.initials = from.initials.clone();
     to.prefs = from.prefs.clone();
     to.system_region = from.system_region.clone();
+    to.user_dict_path = from.user_dict_path.clone();
+    to.set_editing_language(from.editing_lang.as_deref());
     to.keymap = from.keymap.clone();
     to.ribbon = from.ribbon.clone();
     to.read_aloud.set_rate(from.read_aloud.rate());
@@ -1210,5 +1216,192 @@ mod workspace_limit_tests {
         assert!(a.status_msg.as_ref().is_some_and(|(message, _)| message.contains("128-tab limit")));
         assert!(a.run("file.new", json!({})).is_err());
         assert_eq!(a.document_tabs().len(), 128);
+    }
+}
+
+#[cfg(test)]
+mod interrupted_quit_tests {
+    use super::*;
+
+    #[test]
+    fn forced_close_during_quit_allows_window_and_close_all_retry() {
+        for window_close in [true, false] {
+            let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+            for text in ["first", "second", "third"] {
+                if text != "first" {
+                    a.run("file.new", json!({})).unwrap();
+                }
+                a.run("text.insert", json!({"text": text})).unwrap();
+            }
+            assert!(!a.close_requested());
+            a.run("ui.saveChanges", json!({"answer": "dontSave"})).unwrap();
+            assert_eq!(a.active_document_tab(), 1);
+            assert!(a.execute("file.close", json!({})).is_err());
+            assert!(a.closing_all && a.dialog.is_some());
+            a.execute("file.close", json!({"force": true})).unwrap();
+            assert_eq!(a.document_tabs().len(), 2);
+            assert!(a.document_tabs().iter().all(|t| t.dirty));
+            assert!(!a.quit_requested);
+            if window_close {
+                assert!(!a.close_requested());
+            } else {
+                a.run("ui.closeAllDocuments", json!({})).unwrap();
+            }
+            assert!(matches!(a.dialog, Some(dialogs::Dialog::SaveChanges { document, .. }) if document == a.session.document_id()));
+            assert_eq!(a.active_document_tab(), 0, "previously reviewed dirty tabs must be reviewed again");
+            a.run("ui.saveChanges", json!({"answer": "cancel"})).unwrap();
+            assert_eq!(a.document_tabs().len(), 2);
+            assert!(a.document_tabs().iter().all(|t| t.dirty));
+            assert!(!a.closing_all && a.pending_closes.is_empty());
+        }
+    }
+}
+
+#[cfg(test)]
+mod review_preferences_tests {
+    use super::*;
+
+    #[test]
+    fn codex_review_new_tabs_keep_effective_editing_language() {
+        for language in ["pl-PL", "en-AU"] {
+            let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+            a.session.set_editing_language(Some(language));
+            a.run("text.insert", json!({"text": "original"})).unwrap();
+            a.session.doc.styles.default_chr.lang = Some("de-DE".into());
+            a.run("file.new", json!({})).unwrap();
+            assert_eq!(a.session.editing_lang.as_deref(), Some(language));
+            assert_eq!(a.session.doc.styles.default_chr.lang.as_deref(), Some(language));
+            for extension in ["txt", "md"] {
+                a.run("file.open", json!({"path": format!("synthetic.{extension}"), "data": "SGVsbG8="})).unwrap();
+                assert_eq!(a.session.editing_lang.as_deref(), Some(language));
+                assert_eq!(a.session.doc.styles.default_chr.lang.as_deref(), Some(language));
+            }
+            assert!(a.switch_document_tab(0));
+            assert_eq!(a.session.doc.styles.default_chr.lang.as_deref(), Some("de-DE"), "switching must preserve the document language");
+        }
+    }
+
+    #[test]
+    fn codex_review_new_tabs_persist_custom_dictionary_changes() {
+        let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+        let root = std::env::temp_dir().join(format!("wordcraft-tab-dictionary-{}-{}", std::process::id(), a.session.document_id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join(Session::USER_DICT_FILE);
+        a.session.user_dict_path = Some(path.clone());
+        a.run("file.new", json!({})).unwrap();
+        a.run("review.addToDictionary", json!({"word": "codextabpersistword"})).unwrap();
+        let persisted = std::fs::read_to_string(&path);
+        a.run("file.options", json!({"removeWords": ["codextabpersistword"]})).unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(persisted.unwrap().lines().any(|w| w == "codextabpersistword"));
+        assert!(a.switch_document_tab(0));
+        assert_eq!(a.session.user_dict_path, Some(path));
+    }
+}
+
+#[cfg(test)]
+mod web_picker_review_tests {
+    use super::*;
+    use std::{
+        cell::RefCell,
+        rc::Rc,
+        sync::mpsc::{Sender, channel},
+    };
+    type Replies = Rc<RefCell<Vec<Sender<PickedFiles>>>>;
+
+    fn browser_app(replies: Replies) -> WordApp {
+        let services = Services {
+            open_async: Some(Box::new(move |_| {
+                let (tx, rx) = channel();
+                replies.borrow_mut().push(tx);
+                rx
+            })),
+            inbox: Some(Inbox::default()),
+            ..Default::default()
+        };
+        WordApp::new(Session::new(wordcraft_doc::Document::new()), services)
+    }
+
+    #[test]
+    fn late_picker_result_cannot_adopt_a_new_tabs_origin() {
+        let replies = Replies::default();
+        let mut a = browser_app(replies.clone());
+        a.pick_recipient_list();
+        a.run("file.new", json!({})).unwrap();
+        a.pick_recipient_list();
+        assert_eq!(replies.borrow().len(), 1, "a second picker cannot replace a pending operation");
+        let old = replies.borrow_mut().remove(0);
+        old.send(vec![("old.txt".into(), b"OldOwner\nPrivate\n".to_vec())]).unwrap();
+        a.drain_inbox();
+        assert!(a.session.merge.headers.is_empty());
+        assert!(a.status_msg.as_ref().is_some_and(|(message, _)| message.contains("no longer active")));
+        assert!(!a.file_dialog_open() && !a.recipient_list_pending);
+        a.pick_recipient_list();
+        assert!(old.send(vec![("late.csv".into(), b"Stale\nPrivate\n".to_vec())]).is_err(), "extra batches cannot leak to the next picker");
+        replies.borrow_mut().remove(0).send(vec![("new.txt".into(), b"NewOwner\nChosen\n".to_vec())]).unwrap();
+        a.drain_inbox();
+        assert_eq!(a.session.merge.headers, ["NewOwner"]);
+        assert!(a.switch_document_tab(0));
+        assert!(a.session.merge.headers.is_empty());
+    }
+
+    #[test]
+    fn a_pending_picker_does_not_claim_unrelated_dropped_documents() {
+        let replies = Replies::default();
+        let mut a = browser_app(replies.clone());
+        a.pick_recipient_list();
+        a.run("file.new", json!({})).unwrap();
+        a.services.inbox.as_ref().unwrap().lock().unwrap().push(("notes.txt".into(), b"Independent drop".to_vec()));
+        a.drain_inbox();
+        assert!(a.session.doc.plain_text(wordcraft_doc::StoryRef::Body).contains("Independent drop"));
+        assert!(a.file_dialog_open());
+        replies.borrow_mut().remove(0).send(Vec::new()).unwrap();
+        a.drain_inbox();
+        assert!(!a.file_dialog_open() && !a.recipient_list_pending);
+    }
+
+    #[test]
+    fn cancelled_or_disconnected_picker_does_not_poison_later_results() {
+        for disconnect in [true, false] {
+            let replies = Replies::default();
+            let mut a = browser_app(replies.clone());
+            a.pick_recipient_list();
+            let tx = replies.borrow_mut().remove(0);
+            if !disconnect {
+                tx.send(Vec::new()).unwrap();
+            }
+            drop(tx);
+            a.drain_inbox();
+            assert!(!a.file_dialog_open() && !a.recipient_list_pending);
+            a.services.inbox.as_ref().unwrap().lock().unwrap().push(("notes.txt".into(), b"After cancellation".to_vec()));
+            a.drain_inbox();
+            assert!(a.session.doc.plain_text(wordcraft_doc::StoryRef::Body).contains("After cancellation"));
+            a.pick_recipient_list();
+            replies.borrow_mut().remove(0).send(vec![("valid.txt".into(), b"Name\nAda\n".to_vec())]).unwrap();
+            a.drain_inbox();
+            assert_eq!(a.session.merge.headers, ["Name"]);
+        }
+    }
+
+    #[test]
+    fn all_files_in_a_picture_picker_batch_keep_their_origin() {
+        let replies = Replies::default();
+        let mut a = browser_app(replies.clone());
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 0, 255])))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        a.pick_picture();
+        a.run("file.new", json!({})).unwrap();
+        let files = vec![("first.png".into(), png.clone()), ("second.png".into(), png.clone())];
+        replies.borrow_mut().remove(0).send(files.clone()).unwrap();
+        a.drain_inbox();
+        assert!(a.session.doc.media.is_empty());
+        assert!(a.switch_document_tab(0));
+        assert!(a.session.doc.media.is_empty());
+        a.pick_picture();
+        replies.borrow_mut().remove(0).send(files).unwrap();
+        a.drain_inbox();
+        assert!(!a.session.doc.media.is_empty(), "an unchanged origin accepts its picture batch");
     }
 }

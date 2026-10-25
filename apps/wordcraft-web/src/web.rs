@@ -249,13 +249,12 @@ fn listen_for_pasted_pictures(inbox: Inbox, ctx: egui::Context) -> Result<(), St
 
 /// `dirty` is the flag the `beforeunload` guard reads ([`guard_unload`]).
 fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: AsyncSaves, messages: Rc<RefCell<Vec<String>>>) -> Services {
-    let open_inbox = inbox.clone();
     let save_ctx = ctx.clone();
     let font_ctx = ctx.clone();
     let font_messages = messages.clone();
     Services {
         open_async: Some(Box::new(move |purpose: &str| {
-            let inbox = open_inbox.clone();
+            let (tx, rx) = std::sync::mpsc::channel();
             let ctx = ctx.clone();
             let dialog = if purpose == "picture" {
                 rfd::AsyncFileDialog::new().add_filter("Pictures", IMAGE_EXTS)
@@ -270,9 +269,9 @@ fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: Asyn
             wasm_bindgen_futures::spawn_local(async move {
                 // Add Font takes every selected file (#1789); the others one.
                 let files = if many { dialog.pick_files().await.unwrap_or_default() } else { dialog.pick_file().await.into_iter().collect() };
+                let mut pending: wordcraft_ui_egui::PickedFiles = Vec::new();
                 for file in files.into_iter().take(MAX_PICKED_FILES) {
                     let mut bytes = file.read().await;
-                    let mut pending = inbox.lock().unwrap_or_else(|e| e.into_inner());
                     // Fonts waiting for the app to drain them stay under a byte cap. A file
                     // over it is queued empty, so Add Font reports that file on its own.
                     let held: usize = pending.iter().map(|(_, b)| b.len()).fold(0, usize::saturating_add);
@@ -280,10 +279,11 @@ fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: Asyn
                         bytes = Vec::new();
                     }
                     pending.push((file.file_name(), bytes));
-                    drop(pending);
-                    ctx.request_repaint();
                 }
+                let _ = tx.send(pending);
+                ctx.request_repaint();
             });
+            rx
         })),
         // Exports ask for a name; the browser decides where the download goes.
         pick_save: Some(Box::new(|name: &str| Some(name.to_string()))),
@@ -304,7 +304,7 @@ fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: Asyn
 
 /// Most files one multi-select pick (Add Font) reads.
 const MAX_PICKED_FILES: usize = 2000;
-/// Most bytes of picked fonts held in the inbox before the app drains them.
+/// Most bytes of picked fonts held in one complete picker result.
 const MAX_PENDING_PICKED_BYTES: usize = 256 << 20;
 /// Most local fonts one Load System Installed Fonts installs (a designer's machine has thousands).
 const MAX_SYSTEM_FONTS: usize = 500;

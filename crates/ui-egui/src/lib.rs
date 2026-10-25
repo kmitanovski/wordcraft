@@ -116,9 +116,10 @@ pub struct Services {
     /// sender counts as cancelled. An `Err` says no system dialog could be shown, and the app shows
     /// its built-in file browser instead (#576). The app shows one dialog at a time ([`file_dialogs`]).
     pub file_dialog: Option<Box<dyn Fn(FileDialogRequest) -> std::sync::mpsc::Receiver<FileDialogAnswer>>>,
-    /// Web: open a file picker; the file arrives later through `inbox`.
-    pub open_async: Option<Box<dyn Fn(&str)>>,
-    /// Web: files (name, bytes) delivered asynchronously (picker, drag and drop).
+    /// Web: open a picker with its own result channel. Send one complete batch; an empty
+    /// batch or disconnected channel means cancellation. The host wakes the UI on completion.
+    pub open_async: Option<Box<dyn Fn(&str) -> std::sync::mpsc::Receiver<PickedFiles>>>,
+    /// Web: files (name, bytes) delivered independently (drag and drop, embedding host).
     pub inbox: Option<Inbox>,
     /// Web: pictures pasted from the browser's clipboard (the bytes; the name is ignored). Kept
     /// apart from `inbox` because a paste only lands in the document when the page is the edit
@@ -234,8 +235,10 @@ pub enum DefaultApp {
     MadeDefault,
 }
 
-/// Files delivered asynchronously.
-pub type Inbox = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
+/// One complete batch of selected files (name, bytes).
+pub type PickedFiles = Vec<(String, Vec<u8>)>;
+/// Files delivered independently of a picker request.
+pub type Inbox = std::sync::Arc<std::sync::Mutex<PickedFiles>>;
 
 /// [`Services::host_save`]: `(file name, bytes, save_as)`. An error means the page didn't get
 /// the file, and the save failed.
@@ -661,10 +664,9 @@ pub struct WordApp {
     pub previews: previews::Previews,
     /// Media key of the picture a pending Change Picture replaces (#147).
     pub change_picture_target: Option<String>,
-    /// Web: a recipient list was asked for (Select Recipients › Use an Existing List…), so the
-    /// next text file from the picker loads as recipients instead of opening (#240).
+    /// Web: a recipient-list picker is awaiting its own result (#240).
     pub recipient_list_pending: bool,
-    async_pick_document: Option<u64>,
+    web_pick: Option<file_dialogs::PendingWebPick>,
     /// The font database's [`generation`](wordcraft_fonts::FontDb::generation) last seen: when
     /// fonts are added or removed (by any route) the font lists and the layout are refreshed.
     font_generation: u64,
@@ -918,7 +920,7 @@ impl WordApp {
             awaiting_save: None,
             change_picture_target: None,
             recipient_list_pending: false,
-            async_pick_document: None,
+            web_pick: None,
             font_generation: wordcraft_fonts::FontDb::global().generation(),
             dialog_pick: None,
             file_dialog: None,
@@ -1164,9 +1166,6 @@ impl WordApp {
         // A pending Change Picture only survives until the next action (#147).
         if !matches!(id, "ui.changePicture" | "picture.change" | "insert.picture") {
             self.change_picture_target = None;
-        }
-        if !matches!(id, "ui.openRecipientList" | "mailings.recipients") {
-            self.recipient_list_pending = false;
         }
         // No document open (#1129): only the commands that open or create one, Help, and the
         // settings work.
@@ -2202,13 +2201,9 @@ impl WordApp {
         }
     }
 
-    /// Pick a recipient list (desktop: through the file dialog hook; web: it arrives through the
-    /// inbox).
+    /// Pick a recipient list with an answer bound to this document.
     fn pick_recipient_list(&mut self) {
-        if let Some(f) = &self.services.open_async {
-            f("recipients");
-            self.async_pick_document = Some(self.session.document_id());
-            self.recipient_list_pending = true;
+        if self.ask_web_file("recipients") {
             return;
         }
         let _ = self.ask_file(file_dialogs::FileDialogRequest::Open { purpose: "recipients".into() }, file_dialogs::AfterPick::Recipients);
@@ -2970,25 +2965,18 @@ impl WordApp {
         }
     }
 
-    /// Files that arrived asynchronously (web picker, drops): documents open, pictures insert,
-    /// recipient lists (CSV/TSV, spreadsheets, or a text file asked for as one) load as recipients.
+    /// Complete browser pickers, then handle independent drops/host files: documents open,
+    /// pictures insert, and CSV/TSV/spreadsheets load as recipient lists.
     fn drain_inbox(&mut self) {
+        self.poll_web_pick();
         let Some(inbox) = self.services.inbox.clone() else { return };
         let files = std::mem::take(&mut *inbox.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
-        if !files.is_empty() && self.async_pick_document.take().is_some_and(|d| d != self.session.document_id()) {
-            self.recipient_list_pending = false;
-            self.status(tl!("File operation cancelled because its document is no longer active."));
-            return;
-        }
         let mut placed_picture = false;
         for (name, bytes) in files {
             let lower = name.to_ascii_lowercase();
             let img = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".wmf", ".emf"].iter().any(|e| lower.ends_with(e));
-            // Any recipient file ends the pending picker request, so a later .txt drop opens normally.
-            let asked = std::mem::take(&mut self.recipient_list_pending);
-            let list = lower.ends_with(".csv") || lower.ends_with(".tsv") || (lower.ends_with(".txt") && asked);
+            let list = lower.ends_with(".csv") || lower.ends_with(".tsv");
             let sheet = wordcraft_engine::cmd::mailings::is_spreadsheet_name(&lower);
-            self.recipient_list_pending = asked && !list && !sheet;
             let r = if sheet {
                 self.load_recipients(json!({"path": name, "data": wordcraft_engine::cmd::insert::base64_encode(&bytes)}))
             } else if wordcraft_fonts::is_font_file_name(&lower) {
@@ -9526,7 +9514,7 @@ mod tests {
     }
 
     /// Add Font… (#582), web: the picker asks for fonts, the picked file arrives through the
-    /// inbox and is added, listed in the font menu and kept in the browser; removing it forgets it.
+    /// picker channel and is added, listed in the font menu and kept in the browser; removing it forgets it.
     #[test]
     fn a_font_picked_on_the_web_is_added_listed_and_kept() {
         const FAMILY: &str = "Uifont Sans 3";
@@ -9542,7 +9530,14 @@ mod tests {
         let mut a = typed();
         let asked = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
         let seen = asked.clone();
-        a.services.open_async = Some(Box::new(move |purpose| *seen.borrow_mut() = purpose.to_string()));
+        let replies = std::rc::Rc::new(std::cell::RefCell::new(Vec::<std::sync::mpsc::Sender<PickedFiles>>::new()));
+        let sends = replies.clone();
+        a.services.open_async = Some(Box::new(move |purpose| {
+            *seen.borrow_mut() = purpose.to_string();
+            let (tx, rx) = std::sync::mpsc::channel();
+            sends.borrow_mut().push(tx);
+            rx
+        }));
         let kept = std::rc::Rc::new(std::cell::RefCell::new(Vec::<(String, usize)>::new()));
         let (k1, k2) = (kept.clone(), kept.clone());
         a.services.store_font = Some(Box::new(move |name, bytes| k1.borrow_mut().push((name.to_string(), bytes.len()))));
@@ -9553,7 +9548,7 @@ mod tests {
         assert!(!a.previews.families().iter().any(|f| f == FAMILY));
         a.run("font.add", json!({})).unwrap();
         assert_eq!(*asked.borrow(), "font");
-        inbox.lock().unwrap().push(("Uifont-Regular.ttf".into(), font.clone()));
+        replies.borrow_mut().remove(0).send(vec![("Uifont-Regular.ttf".into(), font.clone())]).unwrap();
         a.drain_inbox();
         a.watch_fonts(&ctx);
         assert!(a.previews.families().iter().any(|f| f == FAMILY), "listed in the font menu at once");
@@ -9569,19 +9564,26 @@ mod tests {
         assert!(!a.previews.families().iter().any(|f| f == FAMILY));
     }
 
-    /// Web: the picked file arrives through the inbox and loads as recipients, even as .txt; a
+    /// Web: the picked file arrives on its own channel and loads as recipients, even as .txt; a
     /// CSV dropped on the page does too. Anything else afterwards opens as before.
     #[test]
     fn an_existing_list_picked_on_the_web_loads_recipients() {
         let mut a = typed();
         let asked = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
         let seen = asked.clone();
-        a.services.open_async = Some(Box::new(move |purpose| *seen.borrow_mut() = purpose.to_string()));
+        let replies = std::rc::Rc::new(std::cell::RefCell::new(Vec::<std::sync::mpsc::Sender<PickedFiles>>::new()));
+        let sends = replies.clone();
+        a.services.open_async = Some(Box::new(move |purpose| {
+            *seen.borrow_mut() = purpose.to_string();
+            let (tx, rx) = std::sync::mpsc::channel();
+            sends.borrow_mut().push(tx);
+            rx
+        }));
         let inbox: Inbox = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         a.services.inbox = Some(inbox.clone());
         assert_eq!(a.run("ui.openRecipientList", json!({})).unwrap(), json!({"pending": true}));
         assert_eq!(*asked.borrow(), "recipients");
-        inbox.lock().unwrap().push(("people.txt".into(), b"Name\tCity\nAda\tLondon\n".to_vec()));
+        replies.borrow_mut().remove(0).send(vec![("people.txt".into(), b"Name\tCity\nAda\tLondon\n".to_vec())]).unwrap();
         a.drain_inbox();
         assert_eq!(a.session.merge.headers, vec!["Name", "City"]);
         assert!(!a.recipient_list_pending);
@@ -9591,7 +9593,7 @@ mod tests {
         assert_eq!(a.session.merge.rows.len(), 2);
         // A CSV picked through the picker must not turn the next .txt drop into recipients.
         a.run("ui.openRecipientList", json!({})).unwrap();
-        inbox.lock().unwrap().push(("people.csv".into(), b"Name,City\nAda,London\n".to_vec()));
+        replies.borrow_mut().remove(0).send(vec![("people.csv".into(), b"Name,City\nAda,London\n".to_vec())]).unwrap();
         a.drain_inbox();
         assert!(!a.recipient_list_pending);
         inbox.lock().unwrap().push(("notes.txt".into(), b"A plain text document.\nAnother line.\n".to_vec()));
@@ -9602,10 +9604,13 @@ mod tests {
         assert_eq!(a.session.merge.headers, vec!["Name", "City"], "the original tab keeps its recipients");
         assert!(a.switch_document_tab(1));
         assert!(body_text(&a).contains("A plain text document."), "the TXT opened as a document");
-        // A cancelled picker leaves nothing pending once the user does something else.
+        // Cancellation arrives on this picker's channel, independently of later commands.
         a.run("ui.openRecipientList", json!({})).unwrap();
         a.run("format.bold", json!({})).unwrap();
-        assert!(!a.recipient_list_pending);
+        assert!(a.recipient_list_pending);
+        replies.borrow_mut().remove(0).send(Vec::new()).unwrap();
+        a.drain_inbox();
+        assert!(!a.recipient_list_pending && !a.file_dialog_open());
     }
 
     /// Issue #859: lifting the pen jumped the view back to the caret, usually on page 1. Drawing

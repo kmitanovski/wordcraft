@@ -1,6 +1,6 @@
 # Document tabs
 
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (review fixes for workspace ownership and dialog safety) · **Target:** WordCraft desktop and web
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (browser picker isolation and follow-up review fixes) · **Target:** WordCraft desktop and web
 
 New, Open, templates, Recent and dropped documents use the current window. Opening a
 saved file already open in that window selects its tab. The Start screen's placeholder
@@ -18,12 +18,14 @@ holds at most 128 documents; recently closed history holds 20 saved paths.
 Each document retains its engine session, undo/redo, selection, canvas and scroll state,
 zoom, protection, comment/reply drafts and permission for AutoSave to write its path.
 Application preferences follow the current settings across existing and newly created
-tabs. Merely opening a file does not authorize AutoSave to rewrite it.
+tabs, including the dictionary persistence path and effective editing language. Merely opening a file does not authorize AutoSave to rewrite it.
 
 Dirty content, unfinished comment drafts and unconfirmed browser saves all count as
 unsaved work. Tab Close, Close Others, Close All and Quit use Save / Don't Save / Cancel.
 Cancel stops the remaining batch; failed saves keep the document open with the reason.
-Repeated window-close requests preserve the current prompt. Save, password, encryption
+Repeated window-close requests preserve the current prompt. An explicit automation close
+during Quit cancels that review; subsequent close requests review every remaining dirty
+document again. Save, password, encryption
 and recovery-discard confirmations prevent switching or opening tabs. Zotero operations
 also block those actions while they require the current session.
 
@@ -37,7 +39,14 @@ Browser save tickets retain the originating document and saved revision. A faile
 cancelled save restores that document's dirty state, including while it is inactive.
 Save As picker results save their originating tab. Other document-specific picker
 results cancel with an explanation if their document is no longer active. A save needed
-to continue a pending close is document modal until its picker finishes.
+to continue a pending close is document modal until its picker finishes. Browser pickers
+have dedicated result channels carrying complete batches, separate from dropped files.
+One picker may be pending at a time, with visible refusal of a second request; cancellation
+or disconnection clears it. Picture and recipient results retain their originating tab
+and operation, including when another tab is selected before the read finishes.
+Host adapters implement `Services::open_async` by returning a `Receiver<PickedFiles>`:
+one complete batch (empty for cancellation), followed by a UI wakeup. They deliver
+independent drops and host-initiated files through `Services::inbox`.
 
 Duplicate-file and Save As destination checks apply within each window. Separate
 windows do not synchronize edits or prevent each other writing the same file. Their
@@ -45,7 +54,7 @@ application preferences use the existing atomic, last-writer-wins publication.
 
 ## Keyboard and accessibility
 
-Explicit user bindings take precedence. Ctrl+Tab / Ctrl+Shift+Tab cycle documents outside
+Customize Keyboard records shortcuts without executing them. Explicit user bindings take precedence. Ctrl+Tab / Ctrl+Shift+Tab cycle documents outside
 tables when multiple tabs exist and the keys are available. A single document does not
 consume cycling. Ordinary Tab / Shift+Tab cell navigation and the platform literal-tab
 binding remain available in tables. Ctrl+Shift+T reopens a closed saved file only when
@@ -116,5 +125,6 @@ See [document-tabs-validation.md](document-tabs-validation.md) for verification 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | Quit retry, dictionary persistence, effective editing language and keyboard recording review fixes |
 | 2026-10-26 | minor | PR review fixes: secondary-window workspace preservation, Start preference, dialog guards, search and dirty reporting |
 | 2026-10-26 | major | Tabs adapted with document-bound saves, pickers, recovery, drafts, guarded closes and workspace restoration |

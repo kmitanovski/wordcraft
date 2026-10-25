@@ -1,7 +1,7 @@
 # Where WordCraft falls short of Word
 
 > **Highlight update:** 2026-10-25 · Highlight shortcut toggles the last chosen colour off when the whole selection has it; explicit colour commands remain setters (#4085). Readiness estimates unchanged.
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (Document tabs and recovery isolation; platform field validation remains) · **Target:** Microsoft Word (Microsoft 365) for Mac 16.113.4
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (Interrupted-Quit tab close fixed; platform field validation remains) · **Target:** Microsoft Word (Microsoft 365) for Mac 16.113.4
 
 Recovery discovery no longer interrupts an explicitly created or opened document. Older copies remain in File › Recover, whose buttons use the interface palette. See [local recovery](recovery.md).
 
@@ -24,6 +24,9 @@ Floating tables count exact contact with a line's bottom edge (#3977); shapes ke
 An otherwise empty section at page start retains its line before continuous content. Shared-section page totals and wrapping earlier text around later floating tables remain open.
 
 Consistent cell widths override stale table grid proportions when their totals agree. Conflicting widths, spans and percentages still need the shared-grid algorithm.
+
+A forced close during Quit no longer strands window close or Close All. Synthetic
+regressions preserve remaining dirty tabs; broader stability validation remains open.
 
 Local desktop recovery now covers unsaved drafts and edits to existing files; see
 [recovery.md](recovery.md). This narrows gap #3 but does not resolve the crash/hang reports or
@@ -145,6 +148,7 @@ Small follow-ups from the 2026-10-25 field, table and AutoFormat batch (#4232):
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | Browser picker ownership, Quit retries, dictionary persistence, effective proofing language and keyboard recording regressions fixed after review. Readiness estimates unchanged. |
 | 2026-10-26 | minor | Document tabs and recovery isolation; platform field validation remains. See [document-tabs.md](document-tabs.md). |
 | 2026-10-25 | trivial | egui 0.37 migration: interface catalogs remain pinned by `craft-i18n.rev` (`9205108…`; 27 languages, English fallback); IME surrounding deletions and composition resets are implemented with regressions, but managed CI passed; native IME acceptance and native-speaker catalog review remain open; no gap or readiness change |
 | 2026-10-17 | trivial | Gap 9 narrowed: Standard (Word 2007, AES-ECB) encrypted packages open with a password under any Word extension; AES headers in Word 97-2003 files are outside the public spec and refused with a clear message; estimate 3–5 → 0 h, since the remaining AES-in-`.doc` case is refused by design |

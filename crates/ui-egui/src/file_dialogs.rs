@@ -156,7 +156,7 @@ impl WordApp {
 
     /// Whether a file dialog is open (its answer hasn't arrived yet), the host's or the built-in one.
     pub fn file_dialog_open(&self) -> bool {
-        self.file_dialog.is_some() || self.file_browser_open()
+        self.file_dialog.is_some() || self.web_pick.is_some() || self.file_browser_open()
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -513,26 +513,22 @@ impl WordApp {
     }
 
     pub(crate) fn open_dialog(&mut self) {
-        if let Some(f) = &self.services.open_async {
-            f("document");
+        if self.ask_web_file("document") {
             return;
         }
         let _ = self.ask_file(FileDialogRequest::Open { purpose: "document".into() }, AfterPick::OpenDocument);
     }
 
     pub(crate) fn pick_picture(&mut self) {
-        if let Some(f) = &self.services.open_async {
-            f("picture");
-            self.async_pick_document = Some(self.session.document_id());
+        if self.ask_web_file("picture") {
             return;
         }
         let _ = self.ask_file(FileDialogRequest::Open { purpose: "picture".into() }, AfterPick::Picture);
     }
 
-    /// Pick a font file to add (Add Font…; web: it arrives through the inbox).
+    /// Pick a font file to add (Add Font…; web: a complete batch on its result channel).
     pub(crate) fn pick_font(&mut self) {
-        if let Some(f) = &self.services.open_async {
-            f("font");
+        if self.ask_web_file("font") {
             return;
         }
         let _ = self.ask_file(FileDialogRequest::OpenMany { purpose: "font".into() }, AfterPick::Font);
@@ -544,6 +540,68 @@ impl WordApp {
             f();
         } else {
             self.status(tl!("All system fonts are already available."));
+        }
+    }
+}
+
+/// A browser picker owns its complete result batch, independently of dropped files.
+pub(crate) struct PendingWebPick {
+    rx: Receiver<crate::PickedFiles>,
+    document: u64,
+    purpose: &'static str,
+}
+
+impl WordApp {
+    /// Returns whether the browser host handled the request, including refusing a second picker.
+    pub(crate) fn ask_web_file(&mut self, purpose: &'static str) -> bool {
+        let Some(show) = &self.services.open_async else { return false };
+        if self.file_dialog_open() {
+            self.status(tl!("A file dialog is already open."));
+            return true;
+        }
+        self.web_pick = Some(PendingWebPick { rx: show(purpose), document: self.session.document_id(), purpose });
+        self.recipient_list_pending = purpose == "recipients";
+        true
+    }
+
+    /// Complete or cancel exactly one picker; never route an answer through the drop inbox.
+    pub(crate) fn poll_web_pick(&mut self) {
+        let Some(pick) = &self.web_pick else { return };
+        let files = match pick.rx.try_recv() {
+            Ok(files) => files,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Vec::new(),
+        };
+        let Some(pick) = self.web_pick.take() else { return };
+        self.recipient_list_pending = false;
+        if files.is_empty() {
+            if pick.purpose == "picture" {
+                self.change_picture_target = None;
+            }
+            return;
+        }
+        if matches!(pick.purpose, "picture" | "recipients") && pick.document != self.session.document_id() {
+            self.status(tl!("File operation cancelled because its document is no longer active."));
+            return;
+        }
+        let mut placed_picture = false;
+        for (name, bytes) in files {
+            let data = wordcraft_engine::cmd::insert::base64_encode(&bytes);
+            let result = match pick.purpose {
+                "font" => self.run("font.add", json!({"name": name, "data": data})),
+                "recipients" => self.load_recipients(json!({"path": name, "data": data})),
+                "picture" => {
+                    self.caret_after_placed_picture(placed_picture);
+                    let result = self.insert_or_change_picture(json!({"data": data}));
+                    placed_picture = Self::placed_in_text(&result);
+                    result
+                }
+                _ => self.run("file.open", json!({"path": name, "data": data})),
+            };
+            match result {
+                Ok(_) => self.ui.backstage = false,
+                Err(error) => self.status(error),
+            }
         }
     }
 }

@@ -1,15 +1,64 @@
 # Document tabs verification
 
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (PR review regressions and workspace ownership)
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (browser picker ownership, Quit, preferences and Codex review gate)
 
 Implementation and source revisions: [document-tabs.md](document-tabs.md).
+
+## Follow-up review gate
+
+Before pushing a remediation, fetch current CodeRabbit reviews and verify each finding
+against the code, reproduce confirmed defects, then run a local `codex review` of the
+PR and final remediation diff. Resolve confirmed review findings, run the affected tests
+and the full `cargo xtask ci`, then inspect and commit the final diff. A passing build
+alone does not satisfy this review gate.
+
+CodeRabbit's retained reliability concern was reproduced: an explicit forced close
+during Quit removed the prompt but stranded the Quit-review latch. The shared tab-close
+path now cancels that interrupted review. A regression covers both window-close and
+Close All retries after one previously reviewed tab, checks that remaining dirty work
+is prompted again, and checks that Cancel preserves it. The regression failed before
+the production fix.
+
+The first local Codex code review inspected the full PR against `a029d8ae` and found
+three additional defects. Each was reproduced before fixing it: newly created sessions
+lost the custom-dictionary persistence path and effective editing language, and tab
+shortcuts consumed keys intended for Customize Keyboard. The shared preferences helper
+now propagates the path and effective language; keyboard recording returns before tab
+shortcut dispatch. Regressions write and read a temporary dictionary file, cover Polish
+and Australian English in New/TXT/Markdown tabs while preserving existing document
+language, and verify forward/reverse cycling and reopen keys remain available to record.
+
+CodeRabbit's completed second pass identified a further browser picker ownership issue.
+Two regressions reproduced a late recipient result adopting another tab's owner and an
+unrelated drop being discarded by a stale picker token. Browser pickers now use one
+request-specific channel carrying a complete batch, separate from the drop/host inbox.
+As on desktop, a pending picker refuses a second picker with visible feedback. Empty
+or disconnected replies cancel cleanly. The operation retains its purpose and document;
+picture/recipient batches cancel if their document is no longer active. Regressions
+cover old and extra replies, cancellation/disconnection, drops during a pending request,
+multiple pictures, and accepting a later valid request. Existing font/recipient tests
+now exercise the result channel.
+
+CodeRabbit's generic docstring coverage result is inconclusive and is not a repository
+CI requirement. The generic percentage alone does not demonstrate a functional defect;
+this change does not add redundant comments merely to satisfy that count.
+
+The final local Codex review checked the complete remediation diff and relevant callers
+against the specification and repository rules, including the browser host callback.
+It reported no actionable defects. That was a source review; test/build results are
+recorded separately below. Eight new regressions cover the confirmed issues.
 
 ## Quality gate
 
 `cargo xtask ci` passed all eight stages locally: formatting, workspace Clippy with
 warnings denied, workspace tests, translation audit, doctests, asset attribution,
 dependency layering and the 16-crate WASM check. The workspace test stage passed
-4395 tests after upstream reconciliation (4196 on the original integration base). Existing ignored benchmarks remain ignored.
+4409 tests after follow-up remediation (4395 after upstream reconciliation; 4196 on
+the original integration base). Existing ignored benchmarks remain ignored. A separate
+`cargo check -p wordcraft-web --target wasm32-unknown-unknown` also passed, covering the
+browser host code omitted from the standard 16-crate WASM gate. Browser picker behavior
+was tested through native channel-based regressions; a real browser picker interaction
+was not executed in this follow-up.
 The translation audit passed; the detailed missing-translation report was unavailable
 because this local build has no `CRAFT_I18N_DIR` catalog checkout.
 
@@ -102,5 +151,6 @@ asset, layering and quality-gate requirements without claiming that unavailable 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | Cover interrupted Quit, dictionary persistence, editing language and keyboard recording; require Codex review before pushing |
 | 2026-10-26 | minor | PR review regressions cover secondary-window workspace ownership, Start disabled, modal scope, search and dirty callbacks |
 | 2026-10-26 | major | Record tab safety regressions, process-termination recovery and screenshot inspection |

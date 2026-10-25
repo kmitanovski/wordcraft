@@ -1496,6 +1496,10 @@ fn is_global_shortcut(key: Key, m: Modifiers) -> bool {
 
 /// Command shortcuts when the canvas isn't focused but no text field is either.
 pub fn global_shortcuts(app: &mut WordApp, ctx: &egui::Context) {
+    // Customize Keyboard records keys before any shortcut can consume them.
+    if matches!(app.dialog, Some(crate::dialogs::Dialog::CustomizeKeyboard { .. })) {
+        return;
+    }
     // Document cycling also works while a comment or another text field has focus.
     if !app.canvas.focused && !app.document_modal() {
         let events = ctx.input(|i| i.events.clone());
@@ -1509,8 +1513,7 @@ pub fn global_shortcuts(app: &mut WordApp, ctx: &egui::Context) {
             }
         }
     }
-    // Customize Keyboard records the keys pressed; they never run commands meanwhile.
-    if app.canvas.focused || ctx.egui_wants_keyboard_input() || matches!(app.dialog, Some(crate::dialogs::Dialog::CustomizeKeyboard { .. })) {
+    if app.canvas.focused || ctx.egui_wants_keyboard_input() {
         return;
     }
     let events = ctx.input(|i| i.events.clone());
@@ -2808,5 +2811,29 @@ mod field_tab_tests {
         .drop_without_applying_deltas();
         assert_eq!(a.active_document_tab(), 0);
         assert_eq!(draft, "Uncommitted comment text");
+    }
+}
+
+#[cfg(test)]
+mod review_shortcut_capture_tests {
+    use super::*;
+
+    #[test]
+    fn codex_review_customize_keyboard_keeps_tab_shortcuts_for_recording() {
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+        a.run("file.new", json!({})).unwrap();
+        a.dialog = Some(crate::dialogs::Dialog::CustomizeKeyboard { form: Box::new(crate::dialogs_keyboard::KeyboardForm::read(&a)) });
+        let ctx = egui::Context::default();
+        let ctrl = if cfg!(target_os = "macos") { Modifiers::CTRL } else { Modifiers::CTRL | Modifiers::COMMAND };
+        for (key, modifiers) in [(Key::Tab, ctrl), (Key::Tab, ctrl | Modifiers::SHIFT), (Key::T, ctrl | Modifiers::SHIFT)] {
+            let event = egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+            ctx.run_ui(egui::RawInput { events: vec![event], ..Default::default() }, |ui| {
+                global_shortcuts(&mut a, ui.ctx());
+                assert!(ui.ctx().input_mut(|i| i.consume_key(modifiers, key)), "shortcut must remain available for recording");
+            })
+            .drop_without_applying_deltas();
+            assert_eq!(a.active_document_tab(), 1);
+            assert!(matches!(a.dialog, Some(crate::dialogs::Dialog::CustomizeKeyboard { .. })));
+        }
     }
 }
