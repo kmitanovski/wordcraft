@@ -1,6 +1,6 @@
 # Document tabs verification
 
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** major (local verification record)
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (PR review regressions and workspace ownership)
 
 Implementation and source revisions: [document-tabs.md](document-tabs.md).
 
@@ -38,6 +38,21 @@ also checks inactive documents, with a regression for an inactive unsaved draft.
 - Headless screenshots inspected at 1440×900 and 780×600 with nine long document names,
   pinning, an active tab and unsaved indicators. The strip scrolls horizontally; the narrow
   ribbon remains responsive. Review artifacts are local under `/tmp/wordcraft-tabs-review/`.
+
+## PR #4359 review follow-up
+
+`cargo xtask ci` passed all eight stages again after these fixes, with 4401 workspace
+tests passing. Five new UI regressions and one desktop preferences regression were added.
+
+All six inline CodeRabbit findings and the additional M8 roadmap finding were verified
+against the published head. Regression coverage adds: Start disabled with an empty
+workspace; exactly one all-tabs dirty notification; ordinary dialog dismissal on tab
+switch and Close All with color-state cleanup; save/password/encryption/recovery
+confirmations continuing to block switches; Enter leaving a disabled-only command
+search open; and a secondary window retaining the primary window's latest persisted
+workspace. Invalid preferences prevent the secondary write rather than replacing them.
+The context-menu label now uses the translation lookup; translations still require the
+external catalogs. M8 now names the remaining window commands individually.
 
 ## Native memory and control probe
 
@@ -87,4 +102,5 @@ asset, layering and quality-gate requirements without claiming that unavailable 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | PR review regressions cover secondary-window workspace ownership, Start disabled, modal scope, search and dirty callbacks |
 | 2026-10-26 | major | Record tab safety regressions, process-termination recovery and screenshot inspection |

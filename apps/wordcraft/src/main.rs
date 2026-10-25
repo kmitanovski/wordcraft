@@ -228,7 +228,14 @@ fn save_prefs(app: &WordApp) {
             log::warn!("preferences: cannot create {}: {e}", dir.display());
             return;
         }
-        match serde_json::to_vec_pretty(&app.prefs()) {
+        let ui = match preferences_for_save(app, &p) {
+            Ok(ui) => ui,
+            Err(e) => {
+                log::warn!("preferences: cannot preserve workspace from {}: {e}", p.display());
+                return;
+            }
+        };
+        match serde_json::to_vec_pretty(&ui) {
             Ok(bytes) => {
                 if let Err(e) = write_prefs(&p, &bytes) {
                     log::warn!("preferences: cannot save {}: {e}", p.display());
@@ -237,6 +244,21 @@ fn save_prefs(app: &WordApp) {
             Err(e) => log::warn!("preferences: cannot serialize: {e}"),
         }
     }
+}
+
+/// Secondary windows keep the primary window's latest saved workspace, not their startup copy.
+fn preferences_for_save(app: &WordApp, path: &std::path::Path) -> std::io::Result<UiState> {
+    let mut ui = app.prefs();
+    if !app.persist_workspace {
+        ui.workspace = match std::fs::read(path) {
+            Ok(bytes) => {
+                UiState::from_json(&bytes).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid preferences"))?.workspace
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+            Err(e) => return Err(e),
+        };
+    }
+    Ok(ui)
 }
 
 /// Writes `bytes` to a sibling temporary file and renames it over `path`, so a failed or
@@ -458,6 +480,7 @@ fn main() -> eframe::Result {
             let mut app = WordApp::new(session, services(file_dialog, &cc.egui_ctx));
             app.set_startup_update_check(true);
             load_prefs(&mut app);
+            app.persist_workspace = !new_window;
             load_user_dictionary(&mut app);
             // A region chosen in File › Options replaces the system's for the first blank
             // document too (#838).
@@ -592,6 +615,37 @@ mod tests {
 #[cfg(test)]
 mod prefs_tests {
     use super::write_prefs;
+
+    #[test]
+    fn secondary_window_preserves_the_latest_primary_workspace() {
+        use wordcraft_ui_egui::{Services, UiState, WordApp};
+        let dir = std::env::temp_dir().join(format!("wordcraft-secondary-prefs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ui.json");
+        let mut primary = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Services::default());
+        primary.run("file.new", serde_json::json!({})).unwrap();
+        let saved = primary.prefs();
+        write_prefs(&path, &serde_json::to_vec(&saved).unwrap()).unwrap();
+        let mut secondary = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Services::default());
+        secondary.apply_prefs(saved);
+        secondary.persist_workspace = false;
+        // Primary saves a newer workspace after the secondary window started.
+        primary.run("file.new", serde_json::json!({})).unwrap();
+        primary.pin_document_tab(0, true);
+        write_prefs(&path, &serde_json::to_vec(&primary.prefs()).unwrap()).unwrap();
+        secondary.session.author = "Secondary window author".into();
+        let ui = super::preferences_for_save(&secondary, &path).unwrap();
+        assert_eq!(serde_json::to_value(&ui.workspace).unwrap(), serde_json::to_value(primary.workspace_snapshot()).unwrap());
+        assert_eq!(ui.author, "Secondary window author");
+        write_prefs(&path, &serde_json::to_vec(&ui).unwrap()).unwrap();
+        assert_eq!(UiState::from_json(&std::fs::read(&path).unwrap()).unwrap().workspace.tabs.len(), 3);
+        std::fs::write(&path, b"invalid").unwrap();
+        assert!(super::preferences_for_save(&secondary, &path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"invalid");
+        std::fs::remove_file(&path).unwrap();
+        assert!(super::preferences_for_save(&secondary, &path).unwrap().workspace.tabs.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn failed_preferences_write_keeps_the_old_file_and_reports_the_error() {

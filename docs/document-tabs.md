@@ -1,6 +1,6 @@
 # Document tabs
 
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** major (initial implementation and safety contract) · **Target:** WordCraft desktop and web
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (review fixes for workspace ownership and dialog safety) · **Target:** WordCraft desktop and web
 
 New, Open, templates, Recent and dropped documents use the current window. Opening a
 saved file already open in that window selects its tab. The Start screen's placeholder
@@ -23,8 +23,9 @@ tabs. Merely opening a file does not authorize AutoSave to rewrite it.
 Dirty content, unfinished comment drafts and unconfirmed browser saves all count as
 unsaved work. Tab Close, Close Others, Close All and Quit use Save / Don't Save / Cancel.
 Cancel stops the remaining batch; failed saves keep the document open with the reason.
-Repeated window-close requests preserve the current prompt. Document dialogs and Zotero
-operations prevent switching or opening tabs while they require the current session.
+Repeated window-close requests preserve the current prompt. Save, password, encryption
+and recovery-discard confirmations prevent switching or opening tabs. Zotero operations
+also block those actions while they require the current session.
 
 Every desktop tab has its own recovery worker. Active and inactive sessions tick, and
 close/exit finishes their pending work. Recovery failures appear on the status bar.
@@ -88,7 +89,9 @@ unreadable files are skipped with visible feedback. Restoration processes at mos
 entries and reports skipped entries above that limit. Untitled entries reopen blank;
 their text is recovered through recovery copies, not preferences. With no saved workspace,
 the existing Start screen preference applies. Explicit Close removes tabs from the saved
-workspace; Quit retains it.
+workspace; Quit retains it. A secondary `--new-window` process preserves the latest
+workspace on disk when saving preferences, so closing it later cannot replace the primary
+window's saved tab list. Ordinary formatting/search dialogs close when switching tabs.
 
 ## Source revisions and attribution
 
@@ -113,4 +116,5 @@ See [document-tabs-validation.md](document-tabs-validation.md) for verification 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | PR review fixes: secondary-window workspace preservation, Start preference, dialog guards, search and dirty reporting |
 | 2026-10-26 | major | Tabs adapted with document-bound saves, pickers, recovery, drafts, guarded closes and workspace restoration |

@@ -2831,7 +2831,7 @@ fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
             let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
             let mut run: Option<&str> = enter.then(|| hits.first().map(|c| c.id)).flatten();
             if run.is_none() && enter {
-                run = tab_hits.first().and_then(|c| c["id"].as_str());
+                run = tab_hits.iter().find(|c| c["enabled"].as_bool().unwrap_or(false)).and_then(|c| c["id"].as_str());
             }
             for c in &hits {
                 let sc = crate::widgets::shortcut_text(app, c.id);
@@ -2855,7 +2855,7 @@ fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
             if !text.is_empty() {
                 ui.separator();
                 let label = crate::i18n::fmt(tl!("Find “{text}” in the document"), &[("text", &text)]);
-                find = ui.add(egui::Button::new(label).min_size(vec2(380.0, 0.0))).clicked() || (enter && hits.is_empty());
+                find = ui.add(egui::Button::new(label).min_size(vec2(380.0, 0.0))).clicked() || (enter && hits.is_empty() && tab_hits.is_empty());
             }
             if let Some(id) = run {
                 let _ = app.run(id, json!({}));

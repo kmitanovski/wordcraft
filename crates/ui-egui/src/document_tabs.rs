@@ -95,6 +95,7 @@ impl WordApp {
         self.smart_art_row_focused = false;
         options::sync(self);
         self.dialog = None;
+        self.colors = None;
         self.ui.backstage = false;
         self.canvas.want_focus = true;
         self.status_msg = None;
@@ -130,9 +131,11 @@ impl WordApp {
 
     /// Queue a close operation that respects each tab's Save Changes prompt.
     pub fn close_other_document_tabs(&mut self, index: usize) -> bool {
-        if index >= self.tabs.len() || self.dialog.is_some() {
+        if index >= self.tabs.len() || self.document_modal() {
             return false;
         }
+        self.dialog = None;
+        self.colors = None;
         self.pending_keep_tab = Some(self.tab_ids[index]);
         self.pending_closes =
             self.tab_ids.iter().enumerate().filter(|(i, _)| *i != index && !self.pinned_tabs[*i]).map(|(_, id)| *id).rev().collect();
@@ -142,9 +145,11 @@ impl WordApp {
 
     /// Close every tab, including pinned tabs, leaving an empty application window.
     pub fn close_all_document_tabs(&mut self) -> bool {
-        if self.dialog.is_some() {
+        if self.document_modal() {
             return false;
         }
+        self.dialog = None;
+        self.colors = None;
         self.pending_keep_tab = None;
         self.pending_closes = self.tab_ids.iter().copied().rev().collect();
         self.continue_pending_closes();
@@ -152,7 +157,7 @@ impl WordApp {
     }
 
     pub(super) fn continue_pending_closes(&mut self) {
-        if self.dialog.is_some() || self.closing_all || self.quit_requested {
+        if self.document_modal() || self.closing_all || self.quit_requested {
             return;
         }
         // Keep the remaining queue off self while closing, so clean tabs don't recurse.
@@ -460,11 +465,11 @@ impl WordApp {
     /// Missing or unreadable documents are skipped; the initial blank stays if nothing opens.
     pub fn restore_workspace(&mut self) -> usize {
         let saved = self.ui.workspace.clone();
-        if !self.session.dirty && self.session.path.is_none() {
-            self.no_document = Some(self.session.document_id());
-        }
         if saved.tabs.is_empty() || self.services.download.is_some() {
             return 0;
+        }
+        if !self.session.dirty && self.session.path.is_none() {
+            self.no_document = Some(self.session.document_id());
         }
         let mut errors = Vec::new();
         if saved.tabs.len() > 128 {
@@ -543,9 +548,15 @@ pub(crate) fn is_tab_command(id: &str) -> bool {
 
 impl WordApp {
     pub(super) fn document_modal(&self) -> bool {
-        self.dialog.is_some()
-            || self.colors.is_some()
-            || self.awaiting_save.is_some()
+        matches!(
+            self.dialog,
+            Some(
+                dialogs::Dialog::SaveChanges { .. }
+                    | dialogs::Dialog::Password { .. }
+                    | dialogs::Dialog::EncryptPassword { .. }
+                    | dialogs::Dialog::DiscardRecovery { .. }
+            )
+        ) || self.awaiting_save.is_some()
             || self.zotero.busy.is_some()
             || self.file_dialog_is_continuation()
     }

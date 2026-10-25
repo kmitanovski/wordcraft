@@ -625,6 +625,8 @@ struct ClosedDocument {
 /// The application.
 pub struct WordApp {
     pub session: Session,
+    /// Secondary desktop windows save preferences without replacing the primary workspace.
+    pub persist_workspace: bool,
     /// Exactly one slot (the active one) is `None`; all other slots hold full document state.
     tabs: Vec<Option<DocumentTab>>,
     /// Stable identity for each tab (unlike its re-orderable display index).
@@ -832,6 +834,7 @@ impl WordApp {
         }
         WordApp {
             session,
+            persist_workspace: true,
             tabs: vec![None],
             tab_ids: vec![1],
             pinned_tabs: vec![false],
@@ -973,7 +976,9 @@ impl WordApp {
         ui.keyboard = self.session.keymap.clone();
         ui.ribbon = self.session.ribbon.clone();
         ui.ink_pens = self.session.view.draw.pens.clone();
-        ui.workspace = self.workspace_snapshot();
+        if self.persist_workspace {
+            ui.workspace = self.workspace_snapshot();
+        }
         ui
     }
 
@@ -2638,7 +2643,6 @@ impl WordApp {
     /// Tell the host whether the document has unsaved changes ([`Services::on_dirty`]).
     fn report_dirty(&self) {
         if let Some(f) = &self.services.on_dirty {
-            f(self.session.dirty || panes::has_comment_drafts(self));
             f(self.any_dirty_documents());
         }
     }
@@ -7893,6 +7897,100 @@ mod tests {
         let canonical = std::fs::canonicalize(&a_path).unwrap();
         assert_eq!(second.document_tab_path(1).as_deref(), Some(canonical.to_string_lossy().as_ref()));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn review_empty_workspace_keeps_blank_editor_when_start_is_disabled() {
+        let mut a = app();
+        a.ui.start_screen = false;
+        assert_eq!(a.restore_workspace(), 0);
+        assert!(!a.start_screen());
+        assert!(a.has_document());
+        assert_eq!(a.document_tabs().len(), 1);
+    }
+
+    #[test]
+    fn review_dirty_callback_reports_inactive_work_once() {
+        let mut a = typed();
+        a.run("file.new", json!({})).unwrap();
+        assert!(!a.session.dirty);
+        let reports = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = reports.clone();
+        a.services.on_dirty = Some(Box::new(move |dirty| seen.borrow_mut().push(dirty)));
+        a.report_dirty();
+        assert_eq!(*reports.borrow(), vec![true]);
+        assert!(a.switch_document_tab(0));
+        a.session.dirty = false;
+        a.report_dirty();
+        assert_eq!(*reports.borrow(), vec![true, false]);
+    }
+
+    #[test]
+    fn review_ordinary_dialogs_allow_switch_and_close_without_leaking_color_state() {
+        let mut a = app();
+        a.run("file.new", json!({})).unwrap();
+        a.dialog = Some(dialogs::Dialog::Zoom { percent: 150.0 });
+        a.colors = Some(colors::ColorsDialog::new(None, colors::Target::cmd("format.color")));
+        assert!(a.switch_document_tab(0));
+        assert!(a.dialog.is_none() && a.colors.is_none());
+        a.dialog = Some(dialogs::Dialog::Zoom { percent: 150.0 });
+        assert!(a.close_all_document_tabs());
+        assert!(!a.has_document());
+    }
+
+    #[test]
+    fn review_confirmation_dialogs_keep_their_originating_tab() {
+        let mut a = app();
+        a.run("file.new", json!({})).unwrap();
+        let protected = [
+            dialogs::Dialog::DiscardRecovery { id: "copy".into(), name: "Draft".into() },
+            dialogs::Dialog::Password { name: "Secret".into(), params: json!({}), password: Default::default(), message: String::new() },
+            dialogs::Dialog::EncryptPassword { password: Default::default(), confirm: Default::default(), message: String::new() },
+            dialogs::Dialog::SaveChanges {
+                name: "Draft".into(),
+                then: "file.close".into(),
+                params: json!({}),
+                document: a.session.document_id(),
+                message: String::new(),
+            },
+        ];
+        for dialog in protected {
+            a.dialog = Some(dialog);
+            assert!(!a.switch_document_tab(0));
+            assert!(a.run("file.new", json!({})).is_err());
+            assert!(!a.close_all_document_tabs());
+            assert!(!a.close_requested());
+            assert_eq!(a.active_document_tab(), 1);
+        }
+    }
+
+    #[test]
+    fn review_enter_does_not_run_disabled_tab_command() {
+        let mut a = app();
+        assert!(a.services.document_window.is_none());
+        a.dialog = Some(dialogs::Dialog::Commands { query: "ui.newWindow".into(), swallow: false });
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+            |ui, app: &mut WordApp| {
+                app.logic(&ui.ctx().clone());
+                app.ui(ui);
+            },
+            a,
+        );
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert!(matches!(h.state().dialog, Some(dialogs::Dialog::Commands { .. })));
+        assert!(!h.state().session.view.nav_pane);
+        let launched = std::rc::Rc::new(std::cell::Cell::new(false));
+        let seen = launched.clone();
+        h.state_mut().services.document_window = Some(Box::new(move || {
+            seen.set(true);
+            Ok(())
+        }));
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert!(launched.get(), "Enter runs the command once enabled");
+        assert!(h.state().dialog.is_none());
     }
 
     #[test]

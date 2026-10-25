@@ -853,7 +853,7 @@ pub fn document_tabs(app: &mut WordApp, ui: &mut Ui) {
                                             let _ = app.run("ui.closeDocument", json!({"id": tab.id}));
                                             ui.close();
                                         }
-                                        if ui.button("Close other unpinned tabs").clicked() {
+                                        if ui.button(tl!("Close other unpinned tabs")).clicked() {
                                             let _ = app.run("ui.closeOtherDocuments", json!({"id": tab.id}));
                                             ui.close();
                                         }
