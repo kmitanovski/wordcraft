@@ -9,12 +9,17 @@ Implementation and source revisions: [document-tabs.md](document-tabs.md).
 `cargo xtask ci` passed all eight stages locally: formatting, workspace Clippy with
 warnings denied, workspace tests, translation audit, doctests, asset attribution,
 dependency layering and the 16-crate WASM check. The workspace test stage passed
-4196 tests. Existing ignored benchmarks remain ignored.
+4395 tests after upstream reconciliation (4196 on the original integration base). Existing ignored benchmarks remain ignored.
 The translation audit passed; the detailed missing-translation report was unavailable
 because this local build has no `CRAFT_I18N_DIR` catalog checkout.
 
 Existing Rust 1.95 Clippy findings were fixed with equivalent boolean expressions and
 match guards in a separate prerequisite commit; the quality bar was not lowered.
+
+The publishing integration reconciles upstream `a029d8ae` (including egui 0.37), keeps
+body-replacement IME tracking, and tests that tab switches interrupt an unfinished
+composition without keeping its pre-edit in the inactive tab. Update restart eligibility
+also checks inactive documents, with a regression for an inactive unsaved draft.
 
 ## Completed checks
 
@@ -36,13 +41,16 @@ match guards in a separate prerequisite commit; the quality bar was not lowered.
 
 ## Native memory and control probe
 
-The final native macOS build used an isolated `WORDCRAFT_PROFILE_DIR` and localhost
+The pre-egui-0.37 native macOS build used an isolated `WORDCRAFT_PROFILE_DIR` and localhost
 control channel. Switch by stable ID, pinning, guarded Quit, Close All and the final
 empty-window state passed. Explicit New Window launched a separate process with a blank
 document. Only synthetic processes and documents were used. An app-window screenshot
 was inspected in the dark system theme. After the final recovery and overflow fixes, a
 rebuilt native app repeated these checks and ten open/edit/close cycles with exit code 0
-(`native-final-smoke.json`).
+(`native-final-smoke.json`). After reconciling upstream egui 0.37, the standalone native
+app was rebuilt and repeated the same switch/pin/guarded-Quit/Close-All/New-Window checks
+and ten cycles, again with exit code 0; its fresh app-window screenshot was inspected.
+The historical 1,200-cycle samples below were not rerun on egui 0.37.
 
 A 1,200-cycle rapid open/edit/close probe completed without command errors. Every closed
 document disappeared from the tab list. RSS samples (KiB) at 0/100/200/300/400/500/600/700/

@@ -51,7 +51,7 @@ binding remain available in tables. Ctrl+Shift+T reopens a closed saved file onl
 no existing binding owns it. Menus display effective shortcuts with the platform formatter.
 
 Tab names, selected state, unsaved status and individual close controls have accessibility
-metadata. Interface strings go through the shared translation catalog; new entries may
+metadata. Switching interrupts the previous document's input-method composition. Interface strings go through the shared translation catalog; new entries may
 fall back to English until translators add them in `storytold/craft-i18n`. No external
 translation repository was changed. Real VoiceOver/NVDA/Orca verification remains open.
 
@@ -103,7 +103,8 @@ Adapted from these local, fetched revisions; no upstream changes were published:
   from dcomp1977 (`dominic@streeem.com`), commit
   `cb9c688c9b5e7ef238b54b387ba3f00c614a658d`, with an explicit New Window request.
 - Integration base: upstream `main` at
-  `b70c746f` (2026-10-25 checkout). Clipboard changes from the PR stack were excluded.
+  `b70c746f` (2026-10-25 checkout), reconciled with `a029d8ae` on 2026-10-26
+  before publication. Clipboard changes from the PR stack were excluded.
 
 Cross-window editing synchronization, tab tear-off and tab groups are deferred.
 See [document-tabs-validation.md](document-tabs-validation.md) for verification evidence.

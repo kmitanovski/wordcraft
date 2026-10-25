@@ -61,6 +61,14 @@ impl WordApp {
             return false;
         }
         let Some(mut next) = self.tabs.get_mut(index).and_then(Option::take) else { return false };
+        // A platform composition belongs to the visible document, never an inactive tab.
+        let composing = !self.canvas.ime_preedit.is_empty();
+        self.canvas.ime_preedit.clear();
+        self.canvas.ime_preedit_range = None;
+        self.canvas.ime_join_text = None;
+        self.session.clear_ime_joins();
+        next.canvas.ime_interrupt_now = true;
+        next.canvas.ime_interrupted_preedit |= composing;
         copy_preferences(&self.session, &mut next.session);
         // Swap the entire session and editor state, never copying a document or its undo stack.
         let previous = DocumentTab {
@@ -757,6 +765,22 @@ mod tests {
         assert!(a.execute("ui.closeAllDocuments", json!({})).is_err());
         assert!(a.execute("ui.confirmQuitTab", json!({})).is_err());
         assert_eq!(a.document_tabs().len(), 2);
+    }
+
+    #[test]
+    fn switching_tabs_interrupts_the_previous_input_method_target() {
+        let mut a = app();
+        edit(&mut a, "first");
+        a.run("file.new", json!({})).unwrap();
+        a.canvas.ime_preedit = "unfinished composition".into();
+        a.canvas.ime_preedit_range = Some(0..2);
+        assert!(a.switch_document_tab(0));
+        assert!(a.canvas.ime_interrupt_now && a.canvas.ime_interrupted_preedit);
+        assert!(a.canvas.ime_preedit.is_empty());
+        assert!(a.switch_document_tab(1));
+        assert!(a.canvas.ime_preedit.is_empty());
+        assert!(a.canvas.ime_preedit_range.is_none());
+        assert!(a.canvas.ime_interrupt_now);
     }
 
     #[test]
