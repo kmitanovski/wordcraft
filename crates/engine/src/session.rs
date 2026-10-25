@@ -1,6 +1,12 @@
 //! The editing session: document, selection, undo/redo, layout, view state.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
+
+// Background work and UI caches share identities across concurrent sessions.
+static NEXT_DOCUMENT_ID: AtomicU64 = AtomicU64::new(1);
 
 /// The system locale (BCP 47 tag) the shell found at startup, for Numeral › System.
 static SYSTEM_LOCALE: OnceLock<String> = OnceLock::new();
@@ -727,7 +733,7 @@ impl Session {
             autocap: None,
             rev: 1,
             protect_facts: std::sync::Mutex::new(None),
-            document_id: 1,
+            document_id: NEXT_DOCUMENT_ID.fetch_add(1, Ordering::Relaxed),
             cache: LayoutCache::new(),
             layout: None,
             typing: None,
@@ -1299,7 +1305,7 @@ impl Session {
     /// Replace the document (open/new).
     pub fn set_document(&mut self, doc: Document) {
         self.autocap = None;
-        self.document_id = self.document_id.wrapping_add(1);
+        self.document_id = NEXT_DOCUMENT_ID.fetch_add(1, Ordering::Relaxed);
         self.bib_style = doc_bib_style(&doc);
         self.doc = doc;
         self.doc.ensure_nonempty();

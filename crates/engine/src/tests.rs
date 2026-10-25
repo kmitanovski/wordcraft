@@ -10511,3 +10511,16 @@ fn export_png_refuses_a_path_that_is_not_png() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn document_identities_are_unique_across_sessions_and_replacements() {
+    let mut a = Session::new(wordcraft_doc::Document::new());
+    let mut b = Session::new(wordcraft_doc::Document::new());
+    let ids = [a.document_id(), b.document_id()];
+    assert_ne!(ids[0], ids[1]);
+    a.set_document(wordcraft_doc::Document::new());
+    b.set_document(wordcraft_doc::Document::new());
+    assert_ne!(a.document_id(), b.document_id());
+    assert!(!ids.contains(&a.document_id()));
+    assert!(!ids.contains(&b.document_id()));
+}
