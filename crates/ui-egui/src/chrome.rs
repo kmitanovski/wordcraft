@@ -758,6 +758,13 @@ impl WordApp {
 /// their labels; pinned tabs occupy the left group. Long lists scroll horizontally.
 pub fn document_tabs(app: &mut WordApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
+    let current = (app.active_document_id(), app.active_document_tab());
+    let reveal_active = ui.ctx().data_mut(|data| {
+        let key = egui::Id::new("last_drawn_document_tab");
+        let changed = data.get_temp::<(u64, usize)>(key) != Some(current);
+        data.insert_temp(key, current);
+        changed
+    });
     egui::Panel::top("document_tabs")
         .exact_size(35.0)
         .frame(egui::Frame::NONE.fill(t.tab_strip).inner_margin(egui::Margin { left: 8, right: 8, top: 3, bottom: 2 }))
@@ -801,6 +808,9 @@ pub fn document_tabs(app: &mut WordApp, ui: &mut Ui) {
                                         if tab.dirty { format!("{} — {}", tab.name, tl!("Unsaved changes")) } else { tab.name.clone() };
                                     response
                                         .widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, tab.active, &accessible));
+                                    if tab.active && reveal_active {
+                                        response.scroll_to_me(None);
+                                    }
                                     hit_rects.push((tab.index, response.rect));
                                     if response.clicked() {
                                         let _ = app.run("ui.switchDocument", json!({"id": tab.id}));

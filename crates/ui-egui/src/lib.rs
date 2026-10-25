@@ -632,12 +632,12 @@ pub struct WordApp {
     recently_closed: Vec<ClosedDocument>,
     /// Stable IDs queued for Close Others / Close All, so earlier closes cannot shift indexes.
     pending_closes: Vec<u64>,
-    pending_restores: Vec<(u64, Value)>,
+    pending_restores: Vec<(u64, u64, Value)>,
     pending_keep_tab: Option<u64>,
     /// For window close, inspect every dirty tab without removing it from the saved workspace.
     quit_reviewed: Vec<u64>,
     quit_original_tab: Option<u64>,
-    /// Drag source index is stable until pointer release; tab reordering occurs after painting.
+    /// Stable ID of the dragged tab; reordering occurs after painting.
     pub(crate) drag_document_tab: Option<u64>,
     next_tab_id: u64,
     active_tab: usize,
@@ -3086,6 +3086,8 @@ pub(crate) fn works_without_document(id: &str) -> bool {
             | "file.listTemplates"
             | "file.open"
             | "file.close"
+            | "file.recover"
+            | "ui.recoveryDiscard"
             | "file.options"
             | "file.setAuthor"
             | "font.add"

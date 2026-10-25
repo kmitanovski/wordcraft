@@ -214,7 +214,7 @@ fn recovery_page(app: &mut WordApp, ui: &mut Ui) {
 
 /// The Backstage pages that work while no document is open (#1129).
 fn works_without_document(page: &str) -> bool {
-    matches!(page, "home" | "new" | "open" | "options")
+    matches!(page, "home" | "new" | "open" | "recover" | "options")
 }
 
 fn heading(ui: &mut Ui, s: &str) {
@@ -1019,6 +1019,52 @@ mod tests {
         settle_recovery(&mut h);
         assert!(h.state().session.recovery_documents().is_empty());
         assert!(h.query_by_label("No recovery copies.").is_some());
+        drop(h);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn typing_before_the_recovery_scan_finishes_cancels_restoration() {
+        let (mut app, root) = recovery_app();
+        let ctx = egui::Context::default();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !app.session.recovery_ready() || app.session.recovery_busy() {
+            app.tick_recovery(&ctx);
+            assert!(std::time::Instant::now() < end);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let id = app.session.recovery_documents()[0].id.clone();
+        app.run("file.recover", json!({"restore": id})).unwrap();
+        app.run("text.insert", json!({"text": "Writing typed before the recovery scan finishes"})).unwrap();
+        app.tick_recovery(&ctx);
+        assert!(app.pending_restores.is_empty());
+        assert_eq!(app.session.doc.plain_text(wordcraft_doc::StoryRef::Body), "Writing typed before the recovery scan finishes");
+        assert!(app.session.dirty && app.session.path.is_none());
+        assert!(app.status_msg.as_ref().is_some_and(|(message, _)| message.contains("Recovery cancelled")));
+        app.finish_recovery();
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn recovery_restore_from_start_replaces_only_the_placeholder() {
+        let (mut app, root) = recovery_app();
+        app.start_screen();
+        let mut h = recovery_harness(app);
+        settle_recovery(&mut h);
+        assert!(!h.state().has_document());
+        h.get_by_label("Restore").click();
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !h.state().session.dirty {
+            h.run_steps(2);
+            assert!(std::time::Instant::now() < end, "restoration from Start must finish");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(h.state().document_tabs().len(), 1);
+        assert!(h.state().has_document() && h.state().session.path.is_none());
+        assert_eq!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body), "Recovered synthetic work");
         drop(h);
         let _ = std::fs::remove_dir_all(root);
     }

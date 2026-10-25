@@ -272,7 +272,7 @@ impl WordApp {
             if self.recovery_config.is_none() {
                 return Err("local recovery requires the desktop host".into());
             }
-            self.pending_restores.push((session.document_id(), params.clone()));
+            self.pending_restores.push((session.document_id(), session.rev(), params.clone()));
             json!({"pending": "recovery"})
         } else {
             session.run(id, params).map_err(|e| e.to_string())?
@@ -459,9 +459,12 @@ impl WordApp {
             return 0;
         }
         let mut errors = Vec::new();
+        if saved.tabs.len() > 128 {
+            errors.push(tl!("Skipped workspace entries beyond the 128-tab limit.").to_string());
+        }
         let mut count = 0;
         let mut active_id = None;
-        for (i, tab) in saved.tabs.iter().enumerate() {
+        for (i, tab) in saved.tabs.iter().take(128).enumerate() {
             let result = match &tab.path {
                 Some(path) => self.add_document_tab("file.open", &json!({"path": path})),
                 None => self.add_document_tab("file.new", &json!({})),
@@ -544,7 +547,7 @@ impl WordApp {
         let (session, drafts) = slot.as_ref().map_or((&self.session, &self.comment_drafts), |t| (&t.session, &t.comment_drafts));
         session.dirty
             || drafts.has_work(session.document_id())
-            || self.pending_restores.iter().any(|(id, _)| *id == session.document_id())
+            || self.pending_restores.iter().any(|(id, _, _)| *id == session.document_id())
             || self.saves_in_flight.iter().any(|s| s.document == session.document_id())
     }
 
@@ -882,14 +885,18 @@ mod tests {
 impl WordApp {
     pub(super) fn tick_recovery(&mut self, ctx: &egui::Context) {
         let pending = std::mem::take(&mut self.pending_restores);
-        for (document, params) in pending {
+        for (document, revision, params) in pending {
             if let Some(session) = self.document_session_mut(document) {
+                if session.rev() != revision {
+                    self.status(tl!("Recovery cancelled: the document changed while the copy was loading."));
+                    continue;
+                }
                 if session.recovery_ready() && !session.recovery_busy() {
                     if let Err(error) = session.run("file.recover", &params) {
                         self.status(error.to_string());
                     }
                 } else {
-                    self.pending_restores.push((document, params));
+                    self.pending_restores.push((document, revision, params));
                 }
             }
         }
@@ -1123,5 +1130,50 @@ mod close_during_picker_tests {
         tx.send(Ok(Vec::new())).unwrap();
         a.poll_file_dialog().unwrap().unwrap();
         assert!(a.session.dirty && a.has_document() && !a.quit_requested);
+    }
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+    use egui_kittest::kittest::Queryable;
+
+    #[test]
+    fn overflow_strip_reveals_the_selected_document() {
+        let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+        for index in 0..12 {
+            a.run("file.new", json!({})).unwrap();
+            a.run("file.properties", json!({"title": format!("Synthetic long document title number {index}")})).unwrap();
+        }
+        let label = format!("{} — Unsaved changes", a.document_tabs().last().unwrap().name);
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(780.0, 600.0)).build_ui_state(
+            |ui, app: &mut WordApp| {
+                app.logic(ui.ctx());
+                app.ui(ui);
+            },
+            a,
+        );
+        h.run_steps(10);
+        assert!(h.ctx.content_rect().contains(h.get_by_label(&label).rect().center()));
+        h.state_mut().run("ui.switchDocument", json!({"index": 1})).unwrap();
+        h.run_steps(10);
+        let first = "Synthetic long document title number 0 — Unsaved changes";
+        assert!(h.ctx.content_rect().contains(h.get_by_label(first).rect().center()));
+    }
+}
+
+#[cfg(test)]
+mod workspace_limit_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_restoration_caps_processing_and_reports_skipped_entries() {
+        let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+        a.ui.workspace.tabs = vec![WorkspaceTab::default(); 140];
+        assert_eq!(a.restore_workspace(), 128);
+        assert_eq!(a.document_tabs().len(), 128);
+        assert!(a.status_msg.as_ref().is_some_and(|(message, _)| message.contains("128-tab limit")));
+        assert!(a.run("file.new", json!({})).is_err());
+        assert_eq!(a.document_tabs().len(), 128);
     }
 }
