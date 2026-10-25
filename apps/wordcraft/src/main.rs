@@ -15,6 +15,7 @@ mod apple_events;
 mod clipboard;
 mod control_server;
 mod default_apps;
+mod document_windows;
 mod file_dialogs;
 #[cfg(any(target_os = "windows", target_os = "macos", test))]
 mod graphics;
@@ -38,15 +39,17 @@ struct App(
     Option<WindowGeometry>,
     Option<control_server::KeyFile>,
     file_dialogs::Launcher,
+    document_windows::Launcher,
     #[cfg(target_os = "macos")] fmv_macos_events::Inbox,
 );
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         #[cfg(target_os = "macos")]
-        apple_events::poll(&self.4, &mut self.0, ctx);
+        apple_events::poll(&self.5, &mut self.0, ctx);
         self.0.logic(ctx);
         self.3.show(frame);
+        self.4.poll();
         // A window that doesn't fit on its screen (the default size on a laptop) shrinks to fit
         // there, so all of the scroll bar can be dragged (#1215). Checked on the frame that first
         // knows the monitor: the off-screen check below takes the pending geometry then.
@@ -94,7 +97,7 @@ impl eframe::App for App {
     }
     fn on_exit(&mut self) {
         print::finish_pending_jobs();
-        self.0.session.finish_recovery();
+        self.0.finish_recovery();
         save_prefs(&self.0);
         if let Some(key_file) = &self.2 {
             key_file.remove();
@@ -122,7 +125,7 @@ fn schedule_macos_terminate(app: &mut WordApp, key_file: Option<&control_server:
     log::info!("window close: quitting");
     // This path can bypass on_exit. Join the owned workers before termination and cleanup.
     print::finish_pending_jobs();
-    app.session.finish_recovery();
+    app.finish_recovery();
     save_prefs(app);
     if let Some(key_file) = key_file {
         key_file.remove();
@@ -271,10 +274,11 @@ const USAGE: &str = "\
 wordcraft — the WordCraft desktop app
 
 USAGE:
-  wordcraft [--sample] [--control PORT] [FILE…]
+  wordcraft [--sample] [--new-window] [--control PORT] [FILE…]
 
 OPTIONS:
   --sample            open the sample document
+  --new-window        open a blank window without restoring the saved workspace
   --control PORT      start the localhost control server on PORT, for agents and scripts
                       (or set WORDCRAFT_CONTROL_PORT); see docs/control-protocol.md
   --version           print the version
@@ -327,6 +331,7 @@ fn main() -> eframe::Result {
     let mut control_port: Option<u16> = std::env::var("WORDCRAFT_CONTROL_PORT").ok().and_then(|p| p.parse().ok());
     let mut files = Vec::new();
     let mut sample = false;
+    let mut new_window = false;
     let (args, other_files) = text_args();
     let mut bad_control: Option<Option<String>> = None;
     let mut args = args.into_iter().peekable();
@@ -341,6 +346,7 @@ fn main() -> eframe::Result {
                 }
             }
             "--sample" => sample = true,
+            "--new-window" => new_window = true,
             "--version" => {
                 println!("wordcraft {} ({})", env!("CARGO_PKG_VERSION"), build_sha());
                 return Ok(());
@@ -442,8 +448,9 @@ fn main() -> eframe::Result {
                 && let Some(dir) = wordcraft_control_key::settings_dir()
             {
                 let ctx = cc.egui_ctx.clone();
-                if let Err(e) = app.session.enable_recovery(dir.join("recovery"), std::sync::Arc::new(move || ctx.request_repaint())) {
+                if let Err(e) = app.enable_recovery(dir.join("recovery"), std::sync::Arc::new(move || ctx.request_repaint())) {
                     log::warn!("local recovery unavailable: {e}");
+                    app.status(e);
                 }
             }
             app.ui.window = restored;
@@ -463,8 +470,13 @@ fn main() -> eframe::Result {
             // Nothing to open (no files, no sample, no control channel driving the editor): start
             // on File › Home, as Word does (#766), unless the Start screen option is off. Files
             // macOS hands over later open on top of it and close it (`apple_events`).
-            if files.is_empty() && other_files.is_empty() && !sample && control_port.is_none() {
+            if files.is_empty() && other_files.is_empty() && !sample && !new_window && control_port.is_none() && app.restore_workspace() == 0 {
                 app.start_screen();
+            }
+            let windows = document_windows::Launcher::default();
+            app.services.document_window = Some(windows.hook());
+            if (!files.is_empty() || !other_files.is_empty()) && !sample {
+                app.empty_window();
             }
             for f in files {
                 if let Err(e) = app.run("file.open", serde_json::json!({"path": f})) {
@@ -480,6 +492,7 @@ fn main() -> eframe::Result {
                 Some(restored.unwrap_or_default()),
                 key_file,
                 dialogs,
+                windows,
                 #[cfg(target_os = "macos")]
                 apple_events.connect(&cc.egui_ctx),
             )))
