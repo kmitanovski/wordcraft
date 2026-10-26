@@ -142,8 +142,9 @@ pub struct CanvasState {
     /// The scroll offset and its maximum at the end of last frame.
     pub(crate) scroll_offset: egui::Vec2,
     scroll_max: egui::Vec2,
-    /// Explicit page turn to apply on the next frame (reading navigation buttons/keys).
-    scroll_request: Option<egui::Vec2>,
+    /// Explicit scroll position to apply on the next frame (reading navigation buttons/keys, a
+    /// window moving into another viewport).
+    pub(crate) scroll_request: Option<egui::Vec2>,
     /// The viewport (the content's visible rect on screen) at the end of last frame; the
     /// drag-select edge auto-scroll decides this frame's scroll from it (#688).
     pub(crate) viewport: Option<egui::Rect>,
@@ -227,6 +228,32 @@ pub struct CanvasState {
 type TablePreviewKey = ((usize, usize, u64, u64, wordcraft_engine::Selection), std::sync::Arc<DocLayout>);
 
 impl CanvasState {
+    /// Another document is shown in the window: everything about the page that was shown (drags,
+    /// menus, the input method's composition, a scroll in progress, rendered pages…) starts
+    /// afresh. What belongs to the window or the user stays: the colours last applied, the
+    /// ruler's tab kind, the faces added for interface text, the page area's size. The scroll
+    /// position comes back by itself, as the page's scroll area keeps one per document in egui's
+    /// memory. `seen`: the document was shown before, so the view stays where it was rather than
+    /// going to the caret.
+    pub(crate) fn show_other_document(&mut self, seen: bool) {
+        let old = std::mem::take(self);
+        let ime_reset = !old.ime_preedit.is_empty() || old.ime_preedit_range.is_some();
+        *self = CanvasState {
+            last_highlight: old.last_highlight,
+            last_font_color: old.last_font_color,
+            last_shading: old.last_shading,
+            ime_faces: old.ime_faces,
+            tab_kind: old.tab_kind,
+            scale: old.scale,
+            canvas_rect: old.canvas_rect,
+            read_viewport: old.read_viewport,
+            web_viewport: old.web_viewport,
+            scroll_to_caret: !seen,
+            ime_reset,
+            ..CanvasState::default()
+        };
+    }
+
     /// Stop a text-selection drag when the pointer gesture becomes an object drag.
     pub(crate) fn cancel_text_drag(&mut self) {
         self.dragging = false;
@@ -1274,7 +1301,8 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     };
     let delta = wheel_delta + auto_delta + middle_delta;
     let mut scroll_area = egui::ScrollArea::both()
-        .id_salt(("canvas_scroll", app.active_document_id()))
+        // One scroll position per open document, so switching back finds the page as it was left.
+        .id_salt(("canvas_scroll", app.session.document_id()))
         .auto_shrink([false, false])
         // Bringing the caret into view glides there, or jumps with animation effects off.
         .animated(animate)
@@ -5732,10 +5760,10 @@ mod tests {
         assert!(matches!(h.state().dialog, Some(crate::dialogs::Dialog::SaveChanges { .. })));
     }
 
-    /// #1348: an agent can't replace the document while comment text is still being typed
-    /// unless it passes `force`, as with unsaved changes.
+    /// #1348: an agent can't close the document while comment text is still being typed unless
+    /// it passes `force`, as with unsaved changes. New and Open open beside it, losing nothing.
     #[test]
-    fn an_agent_cannot_replace_the_document_over_a_pending_comment_draft() {
+    fn an_agent_cannot_close_the_document_over_a_pending_comment_draft() {
         let (mut h, id) = comment_harness();
         h.state_mut().session.dirty = false;
         click_balloon(&mut h, id);
@@ -5769,7 +5797,8 @@ mod tests {
         assert!(h.state_mut().close_requested(), "Don't Save closes");
     }
 
-    /// #1348: New with a refused draft asks to save; Don't Save makes the new document.
+    /// #1348: New with a refused draft opens beside it, asking nothing; the draft waits with its
+    /// document and is there when that document is shown again.
     #[test]
     fn a_refused_comment_draft_stays_with_its_document_across_tabs() {
         let (mut h, id) = refused_draft();

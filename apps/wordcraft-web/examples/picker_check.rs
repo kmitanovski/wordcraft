@@ -3,10 +3,13 @@
 //! dismissal/selection checks in docs/document-tabs-validation.md.
 
 #[cfg(target_arch = "wasm32")]
-const MAX_PICKED_FILES: usize = 2000;
+use picked_files::MAX_PICKED_FILES;
 #[cfg(target_arch = "wasm32")]
 #[path = "../src/web/file_picker.rs"]
 mod file_picker;
+#[cfg(target_arch = "wasm32")]
+#[path = "../src/web/picked_files.rs"]
+mod picked_files;
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
@@ -37,6 +40,16 @@ pub async fn check_dismissal() -> Result<(), wasm_bindgen::JsValue> {
         }
     }
     Ok(())
+}
+
+/// Exercise the production batch reader with real browser Files, including injected read failures.
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub async fn read_files(files: js_sys::Array, many: bool) -> Result<String, wasm_bindgen::JsValue> {
+    use wasm_bindgen::JsCast as _;
+    let files = files.iter().map(|file| file.dyn_into::<web_sys::File>()).collect::<Result<Vec<_>, _>>()?;
+    let (files, messages) = picked_files::read(files, many).await;
+    Ok(serde_json::json!({"files": files, "messages": messages}).to_string())
 }
 
 fn main() {}

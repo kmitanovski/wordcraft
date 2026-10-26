@@ -1686,7 +1686,14 @@ pub fn show(app: &mut WordApp, ctx: &egui::Context) {
             });
         }
         count_dialog_frame(ctx, id);
-        close |= crate::window_close::show(ctx, &shown.response, &Tokens::get(ctx));
+        let dismissed = crate::window_close::show(ctx, &shown.response, &Tokens::get(ctx));
+        if dismissed && !close && matches!(d, Dialog::SaveChanges { .. }) && app.dialog.is_none() {
+            app.dialog = Some(d);
+            let _ = app.run("ui.saveChanges", json!({"answer": "cancel"}));
+            app.canvas.want_focus = true;
+            return;
+        }
+        close |= dismissed;
     }
     if close {
         app.canvas.want_focus = true;
@@ -2821,13 +2828,7 @@ fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
                 reg.all().iter().filter(|c| command_matches(c, query)).collect()
             };
             hits.truncate(14);
-            let tab_hits: Vec<_> = crate::document_tabs::commands(app)
-                .into_iter()
-                .filter(|c| {
-                    !query.trim().is_empty()
-                        && query.split_whitespace().all(|word| format!("{} {}", c["label"], c["id"]).to_lowercase().contains(&word.to_lowercase()))
-                })
-                .collect();
+            let tab_hits: Vec<_> = crate::document_tabs::commands(app).into_iter().filter(|c| tab_command_matches(c, query)).collect();
             let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
             let mut run: Option<&str> = enter.then(|| hits.first().map(|c| c.id)).flatten();
             if run.is_none() && enter {
@@ -2855,10 +2856,16 @@ fn body(app: &mut WordApp, ui: &mut Ui, d: &mut Dialog) -> bool {
             if !text.is_empty() {
                 ui.separator();
                 let label = crate::i18n::fmt(tl!("Find “{text}” in the document"), &[("text", &text)]);
-                find = ui.add(egui::Button::new(label).min_size(vec2(380.0, 0.0))).clicked() || (enter && hits.is_empty() && tab_hits.is_empty());
+                // A disabled Reopen Closed Tab has no effect, so Enter can still search the document text.
+                let disabled_tab_command = tab_hits
+                    .iter()
+                    .any(|command| command["enabled"].as_bool() != Some(true) && command["id"].as_str() != Some("ui.reopenClosedDocument"));
+                find = ui.add(egui::Button::new(label).min_size(vec2(380.0, 0.0))).clicked() || (enter && hits.is_empty() && !disabled_tab_command);
             }
             if let Some(id) = run {
-                let _ = app.run(id, json!({}));
+                if let Err(error) = app.run(id, json!({})) {
+                    app.status(error);
+                }
             } else if find {
                 find_in_navigation_pane(app, ui.ctx(), &text);
             }
@@ -4111,7 +4118,8 @@ const SEARCH_SUGGESTIONS: [&str; 3] = ["review.spelling", "review.wordCount", "f
 
 /// Search's "Find … in the document": the Navigation pane opens on its results for `text`.
 fn find_in_navigation_pane(app: &mut WordApp, ctx: &egui::Context, text: &str) {
-    ctx.data_mut(|d| d.insert_temp(egui::Id::unique("nav_query"), text.to_string()));
+    let qid = app.window_id("nav_query");
+    ctx.data_mut(|d| d.insert_temp(qid, text.to_string()));
     app.ui.nav_tab = "results".into();
     let _ = app.run("view.navigationPane", json!({"value": true}));
     let _ = app.run("edit.find", json!({"text": text}));
@@ -4131,6 +4139,16 @@ fn swallow_shortcut_text(swallow: &mut bool, e: &egui::Event) -> bool {
         }
         _ => false,
     }
+}
+
+fn tab_command_matches(command: &serde_json::Value, query: &str) -> bool {
+    let id = command["id"].as_str().unwrap_or("");
+    let label = command["label"].as_str().unwrap_or("");
+    if matches!(id, "ui.documentTabs" | "ui.switchDocument" | "ui.moveDocument") || query.trim().is_empty() {
+        return false;
+    }
+    let hay = format!("{} {} {}", label.to_lowercase(), id.to_lowercase(), crate::i18n::lowercase(tl!(label)));
+    query.split_whitespace().all(|word| hay.contains(&word.to_lowercase()) || hay.contains(&crate::i18n::lowercase(word)))
 }
 
 /// Search's filter: every word of the query is in the command's label, location or id, in English
@@ -4569,6 +4587,31 @@ mod tests {
         assert_eq!(run(&[key(egui::Key::B, false), text("b")]), vec![key(egui::Key::B, false), text("b")], "a click-opened box takes typing");
     }
 
+    #[test]
+    fn tab_search_matches_translated_labels() {
+        crate::i18n::set_current(crate::i18n::fixture_lang("tr", "\tClose Tab\tİçindekini Kapat\n"));
+        let command = serde_json::json!({"id": "ui.closeDocument", "label": "Close Tab"});
+        for query in ["içindekini kapat", "İÇİNDEKİNİ KAPAT", "Close Tab", "ui.closeDocument"] {
+            assert!(tab_command_matches(&command, query), "{query}");
+        }
+        assert!(!tab_command_matches(&command, "\""));
+        crate::i18n::set_current(crate::i18n::Lang::EN);
+    }
+
+    #[test]
+    fn tab_search_excludes_commands_requiring_parameters_or_returning_only_data() {
+        let app = app_with("");
+        let commands = crate::document_tabs::commands(&app);
+        for id in ["ui.documentTabs", "ui.switchDocument", "ui.moveDocument"] {
+            let command = commands.iter().find(|c| c["id"] == id).unwrap();
+            assert!(!tab_command_matches(command, id));
+        }
+        for id in ["ui.closeDocument", "ui.closeOtherDocuments", "ui.closeAllDocuments", "ui.pinDocument", "ui.nextDocument"] {
+            let command = commands.iter().find(|c| c["id"] == id).unwrap();
+            assert!(tab_command_matches(command, id));
+        }
+    }
+
     /// #819: Search matches every word anywhere in the label, location or id, in any order.
     #[test]
     fn command_search_matches_every_word() {
@@ -4811,15 +4854,16 @@ mod tests {
 
     /// #1346: a check box the selected paragraphs differ in shows as neither on nor off; a click
     /// and OK turn it on in all of them, and the other fields they differ in stay as they were.
-    /// #3028: the records dialog refuses a range with no records itself, before Save Changes asks
-    /// about the unsaved document; a good range goes on to that question.
+    /// #3028: the records dialog refuses a range with no records itself; a good range merges into
+    /// a new document beside the unsaved one, asking nothing.
     #[test]
-    fn merge_records_dialog_checks_the_range_before_asking_to_save() {
+    fn merge_records_dialog_checks_the_range_before_merging() {
         use egui_kittest::kittest::Queryable;
         let mut app = app_with("Dear ");
         let _ = app.run("mailings.recipients", json!({"csv": "Name\nAda\nAlan\nGrace"}));
         let _ = app.run("text.insert", json!({"text": "unsaved"}));
         assert!(app.session.dirty);
+        let source = app.session.document_id();
         app.dialog = Dialog::open("mergeRecords", &mut app);
         if let Some(Dialog::MergeRecords { choice, from, to, .. }) = &mut app.dialog {
             *choice = 2;
@@ -4855,8 +4899,10 @@ mod tests {
         for _ in 0..2 {
             h.step();
         }
-        assert_eq!(h.state().dialog.as_ref().map(|d| d.name()), Some("saveChanges"));
-        assert!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body).contains("unsaved"), "nothing merged yet");
+        assert!(h.state().dialog.is_none(), "nothing to ask about: the merge opens beside");
+        assert_ne!(h.state().session.document_id(), source, "the merge is a new document");
+        h.state_mut().run("view.switchWindows", json!({"id": source})).unwrap();
+        assert!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body).contains("unsaved"), "the unsaved document is still open");
     }
 
     #[test]

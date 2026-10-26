@@ -13,6 +13,8 @@ const DOC_EXTS: &[&str] = &["docx", "docm", "dotx", "dotm", "doc", "dot", "odt",
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp", "wmf", "emf"];
 const RECIPIENT_EXTS: &[&str] = wordcraft_engine::cmd::mailings::RECIPIENT_EXTENSIONS;
 mod file_picker;
+mod picked_files;
+use picked_files::MAX_PICKED_FILES;
 mod font_store;
 const CANVAS_ID: &str = "wordcraft_canvas";
 const LOADING_ID: &str = "wordcraft_loading";
@@ -147,15 +149,14 @@ fn stored_prefs() -> Option<String> {
 }
 
 impl eframe::App for WebShell {
-    /// Runs one browser frame: forwards queued host messages to the status bar, advances the app,
-    /// then writes changed preferences to browser storage immediately, because a reload or closed
-    /// tab never runs the exit path.
+    /// Runs one browser frame: advances the app, posts queued host messages after its document
+    /// state changes, then writes preferences immediately because a reload skips the exit path.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let msgs = std::mem::take(&mut *self.messages.borrow_mut());
-        for msg in msgs {
-            self.app.status(msg);
-        }
         self.app.logic(ctx);
+        if crate::status::post(&mut self.app, msgs) {
+            ctx.request_repaint();
+        }
         // Store changed preferences straight away: a reload or closed tab runs no exit code (#2132).
         if let Some(json) = self.prefs.changed(&self.app) {
             match local_storage() {
@@ -257,6 +258,7 @@ fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: Asyn
         open_async: Some(Box::new(move |purpose: &str| {
             let (tx, rx) = std::sync::mpsc::channel();
             let ctx = ctx.clone();
+            let messages = messages.clone();
             let extensions = match purpose {
                 "picture" => IMAGE_EXTS,
                 "font" => wordcraft_fonts::FONT_FILE_EXTS,
@@ -271,26 +273,12 @@ fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: Asyn
                     Ok(selection) => selection.files().await,
                     Err(error) => {
                         log::error!("couldn't open the file picker: {error:?}");
+                        messages.borrow_mut().push(wordcraft_ui_egui::i18n::t("Could not open the file picker.").to_string());
                         Vec::new()
                     }
                 };
-                let mut pending: wordcraft_ui_egui::PickedFiles = Vec::new();
-                for file in files.into_iter().take(MAX_PICKED_FILES) {
-                    let mut bytes = match wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await {
-                        Ok(buffer) => js_sys::Uint8Array::new(&buffer).to_vec(),
-                        Err(error) => {
-                            log::error!("couldn't read the picked file: {error:?}");
-                            Vec::new()
-                        }
-                    };
-                    // Fonts waiting for the app to drain them stay under a byte cap. A file
-                    // over it is queued empty, so Add Font reports that file on its own.
-                    let held: usize = pending.iter().map(|(_, b)| b.len()).fold(0, usize::saturating_add);
-                    if many && held.saturating_add(bytes.len()) > MAX_PENDING_PICKED_BYTES {
-                        bytes = Vec::new();
-                    }
-                    pending.push((file.name(), bytes));
-                }
+                let (pending, errors) = picked_files::read(files, many).await;
+                messages.borrow_mut().extend(errors);
                 let _ = tx.send(pending);
                 ctx.request_repaint();
             });
@@ -313,10 +301,6 @@ fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: Asyn
     }
 }
 
-/// Most files one multi-select pick (Add Font) reads.
-const MAX_PICKED_FILES: usize = 2000;
-/// Most bytes of picked fonts held in one complete picker result.
-const MAX_PENDING_PICKED_BYTES: usize = 256 << 20;
 /// Most local fonts one Load System Installed Fonts installs (a designer's machine has thousands).
 const MAX_SYSTEM_FONTS: usize = 500;
 /// Most font bytes one Load System Installed Fonts reads into memory (wasm memory is small).

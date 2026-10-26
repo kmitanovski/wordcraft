@@ -12,16 +12,28 @@ Restore opens a new, unsaved tab with no file path, preserving current writing. 
 Recovery never writes to the original document. AutoSave's permission to write to an earlier
 file is cleared on restore.
 
-Continue without restoring leaves copies available. Discard asks for confirmation and deletes
-the selected copy, including its retained generation. It does not delete the editing document.
-After discarding that document's copy, another copy is made only after a further edit.
-A successful save removes that document's recovery copy on the next worker cycle while it
-remains open. Copies left after switching documents can still be explicitly discarded.
+File › Recover lists copies from earlier runs: crashed sessions, documents replaced in this
+one, and copies whose deletion failed. The copies the open documents keep are not listed;
+they are not lost. Continue without restoring leaves copies available. Discard asks for
+confirmation and deletes the selected copy, including its retained generation.
 
 Documents with a password do not get plaintext recovery copies. Applying a password waits for
 any pending snapshot, removes the current document's recovery generations, and fails if cleanup
 fails. Encrypted recovery is not implemented. Documents opened with a password keep recovery
 disabled for that session. Removing the password allows future recovery again.
+
+## Several open documents
+
+Every dirty open document keeps its own copy, whether it is shown or not. A crash with several
+unsaved documents leaves a copy of each, and the next start lists them all.
+
+| Event | That document's copy |
+|---|---|
+| Save | Deleted on the next worker cycle |
+| Close without saving (Don't Save, `file.closeDocument`) | Deleted on the next worker cycle |
+| Don't Save when quitting | Deleted before the app exits |
+| Clean exit | Waits for the worker, then deletes the copies of documents saved, closed or protected since their last copy; dirty documents keep theirs |
+| Crash | Kept |
 
 ## Storage and timing
 

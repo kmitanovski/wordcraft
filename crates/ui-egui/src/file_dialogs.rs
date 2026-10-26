@@ -60,8 +60,10 @@ pub(crate) enum AfterPick {
         document: u64,
         after: Box<AfterPick>,
     },
-    /// Open the picked document.
-    OpenDocument,
+    /// Open the picked document from the window showing `document` ([`WordApp::open_file`]).
+    OpenDocument {
+        document: u64,
+    },
     /// Insert the picked picture, or replace the pending Change Picture target.
     Picture,
     /// Save the document there, then carry on.
@@ -128,10 +130,14 @@ pub(crate) enum Asked {
 impl AfterPick {
     pub(crate) fn bind(self, document: u64) -> Self {
         match self {
-            Self::Bound { .. } | Self::OpenDocument | Self::Font => self,
+            Self::Bound { .. } | Self::OpenDocument { .. } | Self::Font => self,
             _ => Self::Bound { document, after: Box::new(self) },
         }
     }
+    pub(crate) fn inactive_save(&self, current_document: u64) -> bool {
+        matches!(self, Self::Bound { document, after } if *document != current_document && matches!(**after, Self::SaveAs { .. }))
+    }
+
     fn continuation(&self) -> bool {
         match self {
             Self::Bound { after, .. } => after.continuation(),
@@ -196,6 +202,9 @@ impl WordApp {
     /// Pick up the answer of an open file dialog, if it has arrived (every frame, from `logic`),
     /// and finish what it was for. `None` while there is nothing to finish.
     pub(crate) fn poll_file_dialog(&mut self) -> Option<Result<Value, String>> {
+        if self.file_dialog.as_ref().is_some_and(|d| d.after.inactive_save(self.session.document_id())) && self.document_modal() {
+            return None;
+        }
         let answer = match self.file_dialog.as_ref().map(|d| d.rx.try_recv()) {
             None | Some(Err(TryRecvError::Empty)) => return None,
             Some(Ok(answer)) => answer,
@@ -292,29 +301,69 @@ impl WordApp {
                 if document == self.session.document_id() {
                     return self.finish_pick(*after, picked);
                 }
+                if matches!(*after, AfterPick::Picture) {
+                    self.clear_picture_target_for_document(document);
+                }
+                if picked.is_none() && !matches!(*after, AfterPick::SaveAs { .. }) {
+                    return Ok(json!({"cancelled": true}));
+                }
                 if !matches!(*after, AfterPick::SaveAs { .. }) {
                     let message = tl!("File operation cancelled because its document is no longer active.").to_string();
                     self.status(message.clone());
                     return Err(message);
                 }
                 let previous = self.active_document_id();
-                let index = self
-                    .tabs
-                    .iter()
-                    .position(|t| t.as_ref().is_some_and(|t| t.session.document_id() == document))
-                    .ok_or("the document for this save has been closed")?;
-                if !self.switch_document_tab(index) {
+                if !self.session.is_open(document) {
+                    return Err("the document for this save has been closed".into());
+                }
+                if self.document_modal() {
                     return Err("cannot finish save while a document dialog is open".into());
                 }
-                let result = self.finish_pick(*after, picked);
-                if let Some(index) = self.tab_ids.iter().position(|&id| id == previous) {
-                    self.switch_document_tab(index);
+                let dialog = self.dialog.take();
+                let colors = self.colors.take();
+                let backstage = self.ui.backstage;
+                let want_focus = self.canvas.want_focus;
+                if document != previous {
+                    let switched = if let Some(index) = self.tab_ids.iter().position(|&id| id == document) {
+                        self.switch_document_tab(index)
+                    } else {
+                        self.show_document(document).is_ok()
+                    };
+                    if !switched {
+                        self.dialog = dialog;
+                        self.colors = colors;
+                        return Err("cannot finish save while a document dialog is open".into());
+                    }
                 }
+                let result = self.finish_pick(*after, picked);
+                let status = self.status_msg.take();
+                if self.tab_ids.contains(&previous) {
+                    if let Some(index) = self.tab_ids.iter().position(|&id| id == previous) {
+                        self.switch_document_tab(index);
+                    }
+                } else if self.session.is_open(previous) {
+                    let _ = self.show_document(previous);
+                }
+                self.status_msg = status;
+                self.dialog = dialog;
+                self.colors = colors;
+                self.ui.backstage = backstage;
+                self.canvas.want_focus = want_focus;
                 result
             }
-            AfterPick::OpenDocument => {
+            AfterPick::OpenDocument { document } => {
                 let Some(path) = picked else { return Ok(json!({"cancelled": true})) };
-                let r = self.run("file.open", json!({"path": path}));
+                if document != self.session.document_id() {
+                    if let Some(index) = self.tab_ids.iter().position(|&id| id == document) {
+                        if !self.switch_document_tab(index) {
+                            return Err("cannot open the picked file while a document dialog is open".into());
+                        }
+                    } else if self.session.is_open(document) {
+                        self.show_document(document)?;
+                    }
+                }
+                let target = self.session.is_open(document).then_some(document);
+                let r = self.open_file(&path, target);
                 self.ui.backstage = false;
                 r
             }
@@ -385,8 +434,12 @@ impl WordApp {
                 r
             }
             AfterPick::SaveAs { after, document } => {
+                // The document it was for may wait behind another one: it is shown and saved.
                 if document != self.session.document_id() {
-                    return Err("the document for this save has been replaced".into());
+                    if !self.session.is_open(document) {
+                        return Err("the document for this save has been closed".into());
+                    }
+                    self.show_document(document)?;
                 }
                 // The save's error, kept for the Save Changes prompt to explain (#1445). A plain
                 // Save As (Backstage's Browse…, AutoSave) has no prompt to carry it to, so it was
@@ -516,7 +569,8 @@ impl WordApp {
         if self.ask_web_file("document") {
             return;
         }
-        let _ = self.ask_file(FileDialogRequest::Open { purpose: "document".into() }, AfterPick::OpenDocument);
+        let _ =
+            self.ask_file(FileDialogRequest::Open { purpose: "document".into() }, AfterPick::OpenDocument { document: self.session.document_id() });
     }
 
     pub(crate) fn pick_picture(&mut self) {
@@ -574,10 +628,10 @@ impl WordApp {
         };
         let Some(pick) = self.web_pick.take() else { return };
         self.recipient_list_pending = false;
+        if pick.purpose == "picture" && (files.is_empty() || pick.document != self.session.document_id()) {
+            self.clear_picture_target_for_document(pick.document);
+        }
         if files.is_empty() {
-            if pick.purpose == "picture" {
-                self.change_picture_target = None;
-            }
             return;
         }
         if matches!(pick.purpose, "picture" | "recipients") && pick.document != self.session.document_id() {
@@ -732,7 +786,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// A late Save As answer belongs to the imported document that opened the picker.
+    /// A late Save As answer belongs to the imported document that opened the picker: once that
+    /// document is closed, it writes nothing.
     #[test]
     fn imported_word_stale_save_as_never_writes_the_replacement_document() {
         for close in [false, true] {
@@ -1100,6 +1155,7 @@ mod tests {
 
     /// "Save changes?" → Save on a new document: the held-back Close runs only once the later
     /// Save As has actually saved; a cancelled Save As cancels the held-back Close.
+    /// Save As has actually saved; a cancelled Save As cancels it.
     #[test]
     fn save_changes_waits_for_the_save_as_answer() {
         let dir = scratch("prompt");

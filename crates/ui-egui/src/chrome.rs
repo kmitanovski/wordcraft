@@ -782,7 +782,8 @@ pub fn document_tabs(app: &mut WordApp, ui: &mut Ui) {
                     ui.spacing_mut().item_spacing = vec2(3.0, 0.0);
                     let mut hit_rects = Vec::new();
                     // Snapshot labels: closing/reordering may change indexes during this frame.
-                    for tab in app.document_tabs() {
+                    let tabs = app.document_tabs();
+                    for tab in tabs.iter().cloned() {
                         let fill = if tab.active { t.ribbon } else { t.tab_strip };
                         let ink = if tab.active { t.text } else { t.text_dim };
                         egui::Frame::NONE
@@ -831,14 +832,14 @@ pub fn document_tabs(app: &mut WordApp, ui: &mut Ui) {
                                             ui.close();
                                         }
                                         ui.separator();
-                                        if ui.add_enabled(tab.index > 0, egui::Button::new(tl!("Move Tab Left"))).clicked() {
+                                        let can_move_left = tab.index.checked_sub(1).is_some_and(|index| app.can_move_document_tab(tab.index, index));
+                                        if ui.add_enabled(can_move_left, egui::Button::new(tl!("Move Tab Left"))).clicked() {
                                             let _ = app.run("ui.moveDocument", json!({"from": tab.index, "to": tab.index - 1}));
                                             ui.close();
                                         }
-                                        if ui
-                                            .add_enabled(tab.index + 1 < app.document_tabs().len(), egui::Button::new(tl!("Move Tab Right")))
-                                            .clicked()
-                                        {
+                                        let can_move_right =
+                                            tab.index.checked_add(1).is_some_and(|index| app.can_move_document_tab(tab.index, index));
+                                        if ui.add_enabled(can_move_right, egui::Button::new(tl!("Move Tab Right"))).clicked() {
                                             let _ = app.run("ui.moveDocument", json!({"from": tab.index, "to": tab.index + 1}));
                                             ui.close();
                                         }
@@ -862,7 +863,13 @@ pub fn document_tabs(app: &mut WordApp, ui: &mut Ui) {
                                             ui.close();
                                         }
                                         ui.separator();
-                                        if ui.add_enabled(app.services.document_window.is_some(), egui::Button::new(tl!("New Window"))).clicked() {
+                                        if ui
+                                            .add_enabled(
+                                                app.windows.native() || app.services.document_window.is_some(),
+                                                egui::Button::new(tl!("New Window")),
+                                            )
+                                            .clicked()
+                                        {
                                             let _ = app.run("ui.newWindow", json!({}));
                                             ui.close();
                                         }

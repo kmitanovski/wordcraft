@@ -284,10 +284,14 @@ pub fn canvas_events(app: &mut WordApp, ctx: &egui::Context) {
         return;
     }
     let events = ctx.input(|i| i.events.clone());
+    let window = app.windows.shown();
     if app.session.view.read_mode {
         // Read Mode is for navigation and selection, not typing into the document. The ribbon's
         // Edit Document button or Escape returns to Print Layout before editing.
         for e in &events {
+            if app.windows.shown() != window {
+                break;
+            }
             match e {
                 // Not while a dialog or menu that takes Escape is open.
                 egui::Event::Key { key: Key::Escape, pressed: true, .. } if app.escape_free => {
@@ -341,6 +345,11 @@ pub fn canvas_events(app: &mut WordApp, ctx: &egui::Context) {
         app.canvas.paste_mods = Some(held);
     }
     for e in events {
+        // A key closed the window (Mod+W) or brought another forward: the frame's other keys
+        // were typed in this one and are dropped.
+        if app.windows.shown() != window {
+            break;
+        }
         interrupted_preedit |= std::mem::take(&mut app.canvas.ime_interrupted_preedit);
         let stale_composition_event = if interrupted_preedit {
             match &e {
@@ -699,7 +708,7 @@ pub fn canvas_events(app: &mut WordApp, ctx: &egui::Context) {
                     }
                     continue;
                 }
-                if leave_full_screen(app, key, modifiers, true) {
+                if leave_full_screen(app, ctx, key, modifiers, true) {
                     continue;
                 }
                 app.canvas.swallow_text = dispatch(app, key, modifiers) && modifiers.alt;
@@ -713,10 +722,15 @@ pub fn canvas_events(app: &mut WordApp, ctx: &egui::Context) {
 /// took it: a pen, a text box, a header, a dialog, a menu or a popup, a drag on the page, and in
 /// the document (`canvas`) a selection, which Escape collapses first (`select.collapse`), as in a
 /// normal window.
-fn leave_full_screen(app: &mut WordApp, key: Key, m: Modifiers, canvas: bool) -> bool {
+fn leave_full_screen(app: &mut WordApp, ctx: &egui::Context, key: Key, m: Modifiers, canvas: bool) -> bool {
     let screen = crate::chrome::Screen::of(&app.session.view).exit_command();
     let Some(id) = screen.or(app.session.view.full_screen.then_some("view.fullScreen")) else { return false };
     if key != Key::Escape || !m.is_none() || !app.escape_free {
+        return false;
+    }
+    // Escape with a button held (dragging a task pane's title bar, say) cancels the drag only.
+    // egui has already dropped the drag itself, so the held button is what is left of it.
+    if ctx.input(|i| i.pointer.any_down()) {
         return false;
     }
     let c = &app.canvas;
@@ -1494,14 +1508,16 @@ fn is_global_shortcut(key: Key, m: Modifiers) -> bool {
     m.command || m.alt || (m.ctrl && (key == Key::Tab || (key == Key::T && m.shift))) || is_function_key(key)
 }
 
-/// Command shortcuts when the canvas isn't focused but no text field is either.
+/// Command shortcuts when the canvas isn't focused and no text field is: nothing has the
+/// keyboard, or a button or a pane's title bar does. A focused widget in an open dialog or popup
+/// keeps the keys, so Ctrl+Z on a dialog button can't undo the document behind it.
 pub fn global_shortcuts(app: &mut WordApp, ctx: &egui::Context) {
     // Customize Keyboard records keys before any shortcut can consume them.
     if matches!(app.dialog, Some(crate::dialogs::Dialog::CustomizeKeyboard { .. })) {
         return;
     }
     // Document cycling also works while a comment or another text field has focus.
-    if !app.canvas.focused && !app.document_modal() {
+    if !app.canvas.focused && app.dialog.is_none() && !app.document_modal() {
         let events = ctx.input(|i| i.events.clone());
         for event in events {
             if let egui::Event::Key { key, pressed: true, modifiers: m, .. } = event
@@ -1513,13 +1529,21 @@ pub fn global_shortcuts(app: &mut WordApp, ctx: &egui::Context) {
             }
         }
     }
-    if app.canvas.focused || ctx.egui_wants_keyboard_input() {
+    if app.canvas.focused || ctx.text_edit_focused() || (ctx.egui_wants_keyboard_input() && crate::panes::overlay_open(app, ctx)) {
         return;
     }
     let events = ctx.input(|i| i.events.clone());
+    let window = app.windows.shown();
     for e in events {
+        // The rest of the keys were pressed in a window that closed or went to the back.
+        if app.windows.shown() != window {
+            break;
+        }
         if let egui::Event::Key { key, pressed: true, modifiers, .. } = e {
-            if leave_full_screen(app, key, modifiers, false) {
+            if app.dialog.is_some() && document_shortcut(app, key, modifiers).is_some() {
+                continue;
+            }
+            if leave_full_screen(app, ctx, key, modifiers, false) {
                 continue;
             }
             if is_global_shortcut(key, modifiers) {
@@ -2817,6 +2841,30 @@ mod field_tab_tests {
 #[cfg(test)]
 mod review_shortcut_capture_tests {
     use super::*;
+
+    #[test]
+    fn tab_shortcuts_preserve_unapplied_dialog_edits() {
+        let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+        a.run("file.new", json!({})).unwrap();
+        a.canvas.focused = false;
+        a.dialog = Some(crate::dialogs::Dialog::Commands { query: "unfinished query".into(), swallow: false });
+        let ctx = egui::Context::default();
+        let ctrl = if cfg!(target_os = "macos") { Modifiers::CTRL } else { Modifiers::CTRL | Modifiers::COMMAND };
+        for (key, modifiers) in [(Key::Tab, ctrl), (Key::Tab, ctrl | Modifiers::SHIFT), (Key::T, ctrl | Modifiers::SHIFT)] {
+            ctx.run_ui(
+                egui::RawInput {
+                    events: vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }],
+                    ..Default::default()
+                },
+                |ui| {
+                    global_shortcuts(&mut a, ui.ctx());
+                },
+            )
+            .drop_without_applying_deltas();
+            assert_eq!(a.active_document_tab(), 1);
+            assert!(matches!(&a.dialog, Some(crate::dialogs::Dialog::Commands { query, .. }) if query == "unfinished query"));
+        }
+    }
 
     #[test]
     fn codex_review_customize_keyboard_keeps_tab_shortcuts_for_recording() {

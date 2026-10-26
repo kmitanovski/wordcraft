@@ -4,33 +4,56 @@ use super::*;
 impl WordApp {
     pub fn empty_window(&mut self) {
         self.no_document = Some(self.session.document_id());
+        self.tab_ids.clear();
+        self.pinned_tabs.clear();
+        self.active_tab = 0;
     }
 
     /// List all open documents, in display order.
     pub fn document_tabs(&self) -> Vec<DocumentTabInfo> {
-        self.tabs
+        let documents = self.session.documents();
+        self.tab_ids
             .iter()
             .enumerate()
-            .filter(|(index, _)| *index != self.active_tab || self.has_document())
-            .map(|(index, slot)| {
-                let session = slot.as_ref().map_or(&self.session, |t| &t.session);
-                let name = session.path.as_ref().and_then(|p| p.file_name()).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| {
-                    if session.doc.core.title.is_empty() {
-                        format!("{} {}", tl!("Document"), self.tab_ids.get(index).copied().unwrap_or(1))
-                    } else {
-                        session.doc.core.title.clone()
-                    }
-                });
-                DocumentTabInfo {
-                    id: self.tab_ids[index],
-                    index,
-                    name,
-                    dirty: self.tab_has_unsaved_work(index),
-                    active: index == self.active_tab,
-                    pinned: self.pinned_tabs[index],
+            .filter_map(|(index, id)| {
+                if Some(*id) == self.no_document {
+                    return None;
                 }
+                let doc = documents.iter().find(|doc| doc.id == *id)?;
+                Some(DocumentTabInfo {
+                    id: *id,
+                    index,
+                    name: documents::display_title(doc),
+                    dirty: self.tab_has_unsaved_work(index),
+                    active: *id == self.session.document_id(),
+                    pinned: self.pinned_tabs.get(index).copied().unwrap_or(false),
+                })
             })
             .collect()
+    }
+
+    pub(crate) fn sync_tab_order(&mut self) {
+        let open: Vec<u64> = self.session.documents().into_iter().map(|doc| doc.id).collect();
+        let mut kept = Vec::new();
+        let mut pins = Vec::new();
+        for (index, id) in self.tab_ids.iter().copied().enumerate() {
+            if Some(id) != self.no_document && open.contains(&id) && !kept.contains(&id) {
+                kept.push(id);
+                pins.push(self.pinned_tabs.get(index).copied().unwrap_or(false));
+            }
+        }
+        let active = self.session.document_id();
+        if Some(active) != self.no_document && open.contains(&active) && !kept.contains(&active) {
+            kept.push(active);
+            pins.push(false);
+        }
+        self.tab_ids = kept;
+        self.pinned_tabs = pins;
+        self.active_tab = self.tab_ids.iter().position(|id| *id == active).unwrap_or(0);
+    }
+
+    pub(crate) fn sync_window_tabs(&mut self) {
+        self.sync_shown_window_tabs();
     }
 
     pub fn active_document_tab(&self) -> usize {
@@ -38,60 +61,38 @@ impl WordApp {
     }
 
     pub fn document_tab_path(&self, index: usize) -> Option<String> {
-        if index >= self.tabs.len() {
-            return None;
-        }
-        let session = self.tabs[index].as_ref().map_or(&self.session, |t| &t.session);
-        session.path.as_ref().map(|p| p.to_string_lossy().into_owned())
+        let id = *self.tab_ids.get(index)?;
+        self.session.documents().into_iter().find(|doc| doc.id == id)?.path?.to_str().map(str::to_owned)
     }
 
     /// Stable ID for egui state such as a document's last scroll offset.
     pub(crate) fn active_document_id(&self) -> u64 {
-        self.tab_ids.get(self.active_tab).copied().unwrap_or(0)
+        self.session.document_id()
     }
 
     pub fn switch_document_tab(&mut self, index: usize) -> bool {
-        if index >= self.tabs.len() {
+        let Some(&id) = self.tab_ids.get(index) else {
+            return false;
+        };
+        if self.document_modal() {
             return false;
         }
         if index == self.active_tab {
             return true;
         }
-        if self.document_modal() {
+        if let Err(error) = self.session.switch_document(id) {
+            self.status(error.to_string());
             return false;
         }
-        let Some(mut next) = self.tabs.get_mut(index).and_then(Option::take) else { return false };
         // A platform composition belongs to the visible document, never an inactive tab.
         let composing = !self.canvas.ime_preedit.is_empty();
         self.canvas.ime_preedit.clear();
         self.canvas.ime_preedit_range = None;
         self.canvas.ime_join_text = None;
         self.session.clear_ime_joins();
-        next.canvas.ime_interrupt_now = true;
-        next.canvas.ime_interrupted_preedit |= composing;
-        copy_preferences(&self.session, &mut next.session);
-        // Swap the entire session and editor state, never copying a document or its undo stack.
-        let previous = DocumentTab {
-            session: std::mem::replace(&mut self.session, next.session),
-            canvas: std::mem::replace(&mut self.canvas, next.canvas),
-            autosave_path: std::mem::replace(&mut self.autosave_path, next.autosave_path),
-            autosave: std::mem::replace(&mut self.autosave, next.autosave),
-            last_autosave: std::mem::replace(&mut self.last_autosave, next.last_autosave),
-            word_count: std::mem::replace(&mut self.word_count, next.word_count),
-            read_aloud_at: std::mem::replace(&mut self.read_aloud_at, next.read_aloud_at),
-            read_aloud_error: std::mem::replace(&mut self.read_aloud_error, next.read_aloud_error),
-            change_picture_target: std::mem::replace(&mut self.change_picture_target, next.change_picture_target),
-            equation_prev_tab: std::mem::replace(&mut self.equation_prev_tab, next.equation_prev_tab),
-            comment_drafts: std::mem::replace(&mut self.comment_drafts, next.comment_drafts),
-            restrict: std::mem::replace(&mut self.restrict, next.restrict),
-            controls: std::mem::replace(&mut self.controls, next.controls),
-            outline_prev_tab: std::mem::replace(&mut self.outline_prev_tab, next.outline_prev_tab),
-            smart_art_item: std::mem::replace(&mut self.smart_art_item, next.smart_art_item),
-            smart_art_typing: std::mem::replace(&mut self.smart_art_typing, next.smart_art_typing),
-            info_editing: std::mem::replace(&mut self.info_editing, next.info_editing),
-        };
-        self.tabs[self.active_tab] = Some(previous);
-        self.active_tab = index;
+        self.sync_tab_document();
+        self.canvas.ime_interrupt_now = true;
+        self.canvas.ime_interrupted_preedit |= composing;
         self.smart_art_row_focused = false;
         options::sync(self);
         self.dialog = None;
@@ -117,7 +118,7 @@ impl WordApp {
 
     /// Toggle pinning; pinned documents form an ordered group at the left edge.
     pub fn pin_document_tab(&mut self, index: usize, pinned: bool) -> bool {
-        if index >= self.tabs.len() {
+        if index >= self.tab_ids.len() {
             return false;
         }
         if self.pinned_tabs[index] == pinned {
@@ -131,7 +132,7 @@ impl WordApp {
 
     /// Queue a close operation that respects each tab's Save Changes prompt.
     pub fn close_other_document_tabs(&mut self, index: usize) -> bool {
-        if index >= self.tabs.len() || self.document_modal() {
+        if index >= self.tab_ids.len() || self.document_modal() {
             return false;
         }
         self.dialog = None;
@@ -157,9 +158,10 @@ impl WordApp {
     }
 
     pub(super) fn continue_pending_closes(&mut self) {
-        if self.document_modal() || self.closing_all || self.quit_requested {
+        if self.document_modal() || self.closing_all || self.quit_requested || self.finishing_pending_closes {
             return;
         }
+        self.finishing_pending_closes = true;
         // Keep the remaining queue off self while closing, so clean tabs don't recurse.
         let mut pending = std::mem::take(&mut self.pending_closes);
         let keep = self.pending_keep_tab.take();
@@ -167,11 +169,16 @@ impl WordApp {
             if let Some(index) = self.tab_ids.iter().position(|t| *t == id) {
                 if let Err(error) = self.close_document_tab(index) {
                     self.status(error);
+                    self.pending_closes.clear();
+                    self.pending_keep_tab = None;
+                    self.closing_window = None;
+                    self.finishing_pending_closes = false;
                     return;
                 }
                 if self.dialog.is_some() || self.file_dialog_is_continuation() || self.awaiting_save.is_some() {
                     self.pending_closes = pending;
                     self.pending_keep_tab = keep;
+                    self.finishing_pending_closes = false;
                     return;
                 }
             }
@@ -181,6 +188,8 @@ impl WordApp {
         {
             self.switch_document_tab(index);
         }
+        self.finishing_pending_closes = false;
+        self.finish_marked_window_close();
     }
 
     /// Reopen the last closed file from disk, not discarded unsaved edits.
@@ -188,9 +197,28 @@ impl WordApp {
         let Some(closed) = self.recently_closed.last().cloned() else {
             return Err("there is no previously closed saved document".into());
         };
-        let path = closed.path.clone();
         // A failed reopen must remain on the history stack for a future retry.
-        let result = self.add_document_tab("file.open", &json!({"path": path}))?;
+        let result = if let Some(path) = closed.path.to_str() {
+            self.add_document_tab("file.open", &json!({"path": path}))?
+        } else if let Some(document) = self.session.find_open(&closed.path) {
+            self.session.activate(document).map_err(|error| error.to_string())?;
+            self.sync_tab_document();
+            json!({"path": closed.path.to_string_lossy(), "id": document, "alreadyOpen": true})
+        } else {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let bytes = wordcraft_engine::io::read_document(&closed.path)?;
+                let name = closed.path.to_string_lossy();
+                let result =
+                    self.add_document_tab("file.open", &json!({"path": name, "data": wordcraft_engine::cmd::insert::base64_encode(&bytes)}))?;
+                self.session.path = Some(closed.path.clone());
+                result
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                return Err("cannot reopen a file whose path is not valid Unicode in the browser".into());
+            }
+        };
         self.recently_closed.pop();
         if result.get("alreadyOpen").and_then(Value::as_bool) == Some(true) {
             return Ok(result);
@@ -201,32 +229,34 @@ impl WordApp {
         let from = self.active_tab;
         let pin_count = self.pinned_tabs.iter().filter(|&&p| p).count();
         let min = if closed.pinned { 0 } else { pin_count };
-        let max = if closed.pinned { pin_count.saturating_sub(1) } else { self.tabs.len() - 1 };
+        let max = if closed.pinned { pin_count.saturating_sub(1) } else { self.tab_ids.len() - 1 };
         self.reorder_document_tab(from, closed.index.clamp(min, max));
         Ok(result)
     }
 
     /// Move an existing tab to another position without affecting any document state.
     pub fn reorder_document_tab(&mut self, from: usize, to: usize) -> bool {
-        if from >= self.tabs.len() || to >= self.tabs.len() {
+        if from >= self.tab_ids.len() || to >= self.tab_ids.len() {
             return false;
         }
         if from == to {
             return true;
         }
         // Only move within the pinned or unpinned group; use pin_document_tab to cross it.
-        if self.pinned_tabs[from] != self.pinned_tabs[to] {
+        if !self.can_move_document_tab(from, to) {
             return false;
         }
         self.move_document_tab_unchecked(from, to)
+    }
+
+    pub(crate) fn can_move_document_tab(&self, from: usize, to: usize) -> bool {
+        from != to && self.pinned_tabs.get(from).zip(self.pinned_tabs.get(to)).is_some_and(|(from, to)| from == to)
     }
 
     pub(super) fn move_document_tab_unchecked(&mut self, from: usize, to: usize) -> bool {
         if from == to {
             return true;
         }
-        let slot = self.tabs.remove(from);
-        self.tabs.insert(to, slot);
         let id = self.tab_ids.remove(from);
         self.tab_ids.insert(to, id);
         let pin = self.pinned_tabs.remove(from);
@@ -238,6 +268,7 @@ impl WordApp {
         } else if from > self.active_tab && to <= self.active_tab {
             self.active_tab += 1;
         }
+        self.active_tab = self.tab_ids.iter().position(|id| *id == self.session.document_id()).unwrap_or(0);
         true
     }
 
@@ -245,26 +276,23 @@ impl WordApp {
         if self.document_modal() {
             return Err("finish the document dialog or operation before opening another tab".into());
         }
-        let placeholder = !self.has_document() && !self.tab_has_unsaved_work(self.active_tab);
-        // Never put two independent edit sessions on the same file. Re-open selects its tab.
+        let placeholder = !self.has_document();
         if id == "file.open"
-            && let Some(path) = params.get("path").and_then(Value::as_str)
             && params.get("data").is_none()
+            && let Some(path) = params.get("path").and_then(Value::as_str)
+            && let Some(document) = self.session.find_open(std::path::Path::new(path))
         {
-            let sought = std::fs::canonicalize(path).ok();
-            let found = self.document_tabs().into_iter().find(|tab| {
-                let session = self.tabs[tab.index].as_ref().map_or(&self.session, |t| &t.session);
-                session
-                    .path
-                    .as_ref()
-                    .is_some_and(|p| p.as_path() == std::path::Path::new(path) || (sought.is_some() && std::fs::canonicalize(p).ok() == sought))
-            });
-            if let Some(tab) = found {
-                self.switch_document_tab(tab.index);
-                return Ok(json!({"path": path, "tab": tab.index, "alreadyOpen": true}));
+            self.session.activate(document).map_err(|e| e.to_string())?;
+            if self.tab_ids.contains(&document) {
+                self.sync_tab_document();
+            } else {
+                self.sync_document();
             }
+            self.recovery_seen = true;
+            self.after_command(id);
+            return Ok(json!({"path": path, "id": document, "alreadyOpen": true}));
         }
-        if self.tabs.len() >= 128 && !placeholder {
+        if self.document_tabs().len() >= 128 && !placeholder {
             return Err("at most 128 document tabs may be open in one window".into());
         }
         if id == "file.recover" {
@@ -273,78 +301,96 @@ impl WordApp {
                 return Err("choose an available recovery copy to restore".into());
             }
         }
-        let mut session = Session::new(self.session.blank_document());
-        copy_preferences(&self.session, &mut session);
-        session.view = self.session.view.clone();
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some((root, wake)) = &self.recovery_config {
-            session.enable_recovery(root.clone(), wake.clone())?;
+        let separate_open = id == "file.open" && !placeholder && self.session.is_untouched_blank();
+        let opening_blank = separate_open.then(|| self.session.blank_document());
+        if let Some(blank) = opening_blank {
+            self.session.add_document(blank);
         }
         let result = if id == "file.recover" {
             #[cfg(not(target_arch = "wasm32"))]
             if self.recovery_config.is_none() {
                 return Err("local recovery requires the desktop host".into());
             }
-            self.pending_restores.push((session.document_id(), session.rev(), params.clone()));
+            let blank = self.session.blank_document();
+            let document = self.session.add_document(blank);
+            self.sync_tab_document();
+            self.pending_restores.push((document, self.session.rev(), params.clone()));
             json!({"pending": "recovery"})
         } else {
-            session.run(id, params).map_err(|e| e.to_string())?
+            let previous = self.session.document_id();
+            let result = match self.session.run(id, params) {
+                Ok(result) => result,
+                Err(error) => {
+                    if separate_open {
+                        let added = self.session.document_id();
+                        let _ = self.session.close_document(added);
+                        self.sync_tab_document();
+                    }
+                    return Err(error.to_string());
+                }
+            };
+            if placeholder && self.session.document_id() == previous && self.session.path.is_some() {
+                self.no_document = None;
+            }
+            self.sync_tab_document();
+            result
         };
-        if placeholder {
-            self.session.finish_recovery();
-            self.session = session;
-            self.canvas = Default::default();
-            self.no_document = None;
-            self.autosave_path = None;
-            self.recovery_seen = true;
-            self.after_command(id);
-            return Ok(result);
-        }
-        self.tabs.push(Some(DocumentTab::new(session)));
-        self.tab_ids.push(self.next_tab_id);
-        self.pinned_tabs.push(false);
-        self.next_tab_id = self.next_tab_id.saturating_add(1);
-        let index = self.tabs.len() - 1;
-        self.switch_document_tab(index);
+        self.sync_tab_order();
         self.recovery_seen = true;
         self.after_command(id);
         Ok(result)
     }
 
     pub(super) fn close_active_tab_now(&mut self) -> Result<Value, String> {
-        if !self.has_document() && !self.tab_has_unsaved_work(self.active_tab) {
+        if !self.has_document() {
             return Ok(json!({"closed": false}));
         }
+        let closed_id = self.session.document_id();
         if let Some(path) = self.session.path.as_ref() {
             // Reopening loads the saved file. Explicitly discarded edits are not recoverable.
-            self.recently_closed.push(ClosedDocument {
-                path: path.to_string_lossy().into_owned(),
-                index: self.active_tab,
-                pinned: self.pinned_tabs[self.active_tab],
-            });
+            self.recently_closed.push(ClosedDocument { path: path.clone(), index: self.active_tab, pinned: self.pinned_tabs[self.active_tab] });
             if self.recently_closed.len() > 20 {
                 self.recently_closed.remove(0);
             }
         }
-        self.confirmed_saves.remove(&self.session.document_id());
+        let shared_with_another_window = self.windows.native() && self.other_window_on_document().is_some();
+        if shared_with_another_window {
+            self.tab_ids.remove(self.active_tab);
+            self.pinned_tabs.remove(self.active_tab);
+            if self.tab_ids.is_empty() {
+                self.no_document = Some(closed_id);
+                self.active_tab = 0;
+                self.canvas = Default::default();
+            } else {
+                let index = self.active_tab.min(self.tab_ids.len() - 1);
+                self.session.activate(self.tab_ids[index]).map_err(|e| e.to_string())?;
+                self.sync_tab_document();
+            }
+            return Ok(json!({"closed": true, "activeTab": self.active_tab}));
+        }
+        self.confirmed_saves.remove(&closed_id);
         // An explicit close supersedes Quit review; remaining dirty tabs need a fresh review.
         if self.closing_all {
             self.cancel_close_sequence();
         }
         self.dialog = None;
         self.colors = None;
-        self.session.dirty = false;
-        self.session.finish_recovery();
-        if self.tabs.len() == 1 {
-            self.session.set_document(self.session.blank_document());
-            self.session.path = None;
+        let previous = self.tab_ids.clone();
+        self.session.close_document(closed_id).map_err(|e| e.to_string())?;
+        self.tab_ids.retain(|id| *id != closed_id);
+        self.pinned_tabs = previous
+            .iter()
+            .filter(|id| **id != closed_id)
+            .filter_map(|id| previous.iter().position(|candidate| candidate == id).and_then(|i| self.pinned_tabs.get(i).copied()))
+            .collect();
+        if self.tab_ids.is_empty() {
             self.no_document = Some(self.session.document_id());
+            self.session.release_untitled_name();
             self.canvas = Default::default();
             self.comment_drafts = Default::default();
             self.restrict = Default::default();
             self.controls = Default::default();
             self.previews = Default::default();
-            self.session.read_aloud.stop();
             self.read_aloud_at = None;
             self.read_aloud_error = None;
             self.change_picture_target = None;
@@ -355,41 +401,18 @@ impl WordApp {
             self.smart_art_row_focused = false;
             self.info_editing = None;
             self.word_count = (0, 0);
-            self.autosave = true;
-            self.last_autosave = 0.0;
             self.autosave_path = None;
             self.ui.backstage = false;
-            self.pinned_tabs[0] = false;
-            self.tab_ids[0] = self.next_tab_id;
-            self.next_tab_id = self.next_tab_id.saturating_add(1);
+            self.pinned_tabs.clear();
+            self.active_tab = 0;
+            self.sync_tab_document();
             return Ok(json!({"closed": true}));
         }
-        self.tabs.remove(self.active_tab);
-        self.tab_ids.remove(self.active_tab);
-        self.pinned_tabs.remove(self.active_tab);
-        let index = self.active_tab.min(self.tabs.len() - 1);
-        let Some(mut next) = self.tabs[index].take() else {
-            return Err("document tabs are in an invalid state".into());
-        };
-        copy_preferences(&self.session, &mut next.session);
-        self.session = next.session;
-        self.canvas = next.canvas;
-        self.autosave_path = next.autosave_path;
-        self.autosave = next.autosave;
-        self.last_autosave = next.last_autosave;
-        self.word_count = next.word_count;
-        self.read_aloud_at = next.read_aloud_at;
-        self.read_aloud_error = next.read_aloud_error;
-        self.change_picture_target = next.change_picture_target;
-        self.equation_prev_tab = next.equation_prev_tab;
-        self.comment_drafts = next.comment_drafts;
-        self.restrict = next.restrict;
-        self.controls = next.controls;
-        self.outline_prev_tab = next.outline_prev_tab;
-        self.smart_art_item = next.smart_art_item;
-        self.smart_art_typing = next.smart_art_typing;
-        self.info_editing = next.info_editing;
-        self.active_tab = index;
+        let index = self.active_tab.min(self.tab_ids.len() - 1);
+        if let Some(&next) = self.tab_ids.get(index) {
+            self.session.activate(next).map_err(|e| e.to_string())?;
+        }
+        self.sync_tab_document();
         self.dialog = None;
         self.status_msg = None;
         self.previews = previews::Previews::default();
@@ -402,7 +425,7 @@ impl WordApp {
     }
 
     pub(super) fn any_dirty_documents(&self) -> bool {
-        (0..self.tabs.len()).any(|i| self.tab_has_unsaved_work(i))
+        self.has_unsaved_documents() || !self.pending_restores.is_empty()
     }
 
     /// Review the dirty tabs without disposing of sessions: the full workspace must still
@@ -411,35 +434,49 @@ impl WordApp {
         if !self.closing_all {
             return;
         }
-        if let Some(index) = self.tab_ids.iter().enumerate().find_map(|(i, id)| {
-            let dirty = self.tab_has_unsaved_work(i);
-            (dirty && !self.quit_reviewed.contains(id)).then_some(i)
-        }) {
-            if index != self.active_tab && !self.switch_document_tab(index) {
+        let session = &mut self.session;
+        self.quit_reviewed.retain(|(id, rev)| session.with_document(*id, |session| session.rev()).is_ok_and(|current| current == *rev));
+        let unsaved = self.unsaved_documents();
+        let next = self
+            .tab_ids
+            .iter()
+            .copied()
+            .find(|id| unsaved.contains(id) && !self.quit_reviewed.iter().any(|(reviewed, _)| reviewed == id))
+            .or_else(|| unsaved.into_iter().find(|id| !self.quit_reviewed.iter().any(|(reviewed, _)| reviewed == id)));
+        if let Some(next) = next {
+            if next != self.session.document_id() && self.show_document(next).is_err() {
                 return;
             }
-            let name =
-                self.session.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| self.title_stem());
+            let name = self
+                .session
+                .documents()
+                .into_iter()
+                .find(|doc| doc.id == next)
+                .map(|doc| documents::display_title(&doc))
+                .unwrap_or_else(|| self.title_stem());
             self.dialog = Some(dialogs::Dialog::SaveChanges {
                 name,
                 then: "ui.confirmQuitTab".into(),
                 params: json!({}),
-                document: self.session.document_id(),
+                document: next,
                 message: String::new(),
             });
         } else {
-            self.session.dirty = false;
-            self.comment_drafts = Default::default();
-            for tab in self.tabs.iter_mut().flatten() {
-                tab.session.dirty = false;
-                tab.comment_drafts = Default::default();
+            for id in self.session.documents().into_iter().map(|doc| doc.id).collect::<Vec<_>>() {
+                let _ = self.session.with_document(id, |session| session.dirty = false);
+                if let Some(parked) = self.parked.get_mut(&id) {
+                    parked.comment_drafts = Default::default();
+                }
             }
+            self.comment_drafts = Default::default();
             // Prompting may have selected several dirty documents. Restore the user's
             // selected document before persisting the workspace on exit.
-            if let Some(id) = self.quit_original_tab
-                && let Some(index) = self.tab_ids.iter().position(|&candidate| candidate == id)
-            {
-                self.switch_document_tab(index);
+            if let Some(id) = self.quit_original_tab {
+                if let Some(index) = self.tab_ids.iter().position(|&candidate| candidate == id) {
+                    self.switch_document_tab(index);
+                } else if self.session.is_open(id) {
+                    let _ = self.show_document(id);
+                }
             }
             self.quit_requested = true;
         }
@@ -447,18 +484,23 @@ impl WordApp {
 
     /// Capture tab order, paths and pinning. Empty tabs reopen blank (never resurrect unsaved text).
     pub fn workspace_snapshot(&self) -> WorkspaceState {
+        let documents = self.session.documents();
         WorkspaceState {
             tabs: self
-                .tabs
+                .tab_ids
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| *i != self.active_tab || self.has_document())
-                .map(|(i, slot)| {
-                    let session = slot.as_ref().map_or(&self.session, |t| &t.session);
-                    WorkspaceTab {
-                        path: session.path.as_ref().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()).to_string_lossy().into_owned()),
-                        pinned: self.pinned_tabs[i],
+                .filter_map(|(i, id)| {
+                    if Some(*id) == self.no_document {
+                        return None;
                     }
+                    let doc = documents.iter().find(|doc| doc.id == *id)?;
+                    let path = doc.path.as_ref().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()));
+                    Some(WorkspaceTab {
+                        path: path.as_ref().and_then(|p| p.to_str().map(str::to_owned)),
+                        pinned: self.pinned_tabs.get(i).copied().unwrap_or(false),
+                        unrestorable_path: path.as_ref().is_some_and(|p| p.to_str().is_none()),
+                    })
                 })
                 .collect(),
             active: self.active_tab,
@@ -472,6 +514,7 @@ impl WordApp {
         if saved.tabs.is_empty() || self.services.download.is_some() {
             return 0;
         }
+        let was_placeholder = self.no_document;
         if !self.session.dirty && self.session.path.is_none() {
             self.no_document = Some(self.session.document_id());
         }
@@ -482,9 +525,18 @@ impl WordApp {
         let mut count = 0;
         let mut active_id = None;
         for (i, tab) in saved.tabs.iter().take(128).enumerate() {
-            let result = match &tab.path {
-                Some(path) => self.add_document_tab("file.open", &json!({"path": path})),
-                None => self.add_document_tab("file.new", &json!({})),
+            let result = if tab.unrestorable_path {
+                Err(tl!("Skipped a workspace entry because its file path is not valid Unicode.").to_string())
+            } else {
+                match &tab.path {
+                    Some(path) => self.add_document_tab("file.open", &json!({"path": path})),
+                    None if self.tab_ids.is_empty() && !self.has_document() => {
+                        self.no_document = None;
+                        self.sync_tab_order();
+                        Ok(json!({"blank": true}))
+                    }
+                    None => self.add_document_tab("file.new", &json!({})),
+                }
             };
             match result {
                 Ok(value) if value.get("alreadyOpen").and_then(Value::as_bool) == Some(true) => {
@@ -509,30 +561,16 @@ impl WordApp {
         if count > 0 {
             let target = active_id
                 .and_then(|id| self.tab_ids.iter().position(|candidate| *candidate == id))
-                .unwrap_or_else(|| saved.active.min(self.tabs.len() - 1));
+                .unwrap_or_else(|| saved.active.min(self.tab_ids.len() - 1));
             self.switch_document_tab(target);
+        } else {
+            self.no_document = was_placeholder;
         }
         if !errors.is_empty() {
             self.status(format!("{}: {}", tl!("Could not restore document"), errors.join("; ")));
         }
         count
     }
-}
-
-fn copy_preferences(from: &Session, to: &mut Session) {
-    to.author = from.author.clone();
-    to.initials = from.initials.clone();
-    to.prefs = from.prefs.clone();
-    to.system_region = from.system_region.clone();
-    to.user_dict_path = from.user_dict_path.clone();
-    to.set_editing_language(from.editing_lang.as_deref());
-    to.keymap = from.keymap.clone();
-    to.ribbon = from.ribbon.clone();
-    to.read_aloud.set_rate(from.read_aloud.rate());
-    to.read_aloud.skip_citations = from.read_aloud.skip_citations;
-    to.view.dark_mode = from.view.dark_mode;
-    to.view.proofing = from.view.proofing;
-    to.view.draw.pens = from.view.draw.pens.clone();
 }
 
 pub(crate) fn is_tab_command(id: &str) -> bool {
@@ -568,19 +606,8 @@ impl WordApp {
     }
 
     pub(super) fn tab_has_unsaved_work(&self, index: usize) -> bool {
-        let Some(slot) = self.tabs.get(index) else { return false };
-        let (session, drafts) = slot.as_ref().map_or((&self.session, &self.comment_drafts), |t| (&t.session, &t.comment_drafts));
-        session.dirty
-            || drafts.has_work(session.document_id())
-            || self.pending_restores.iter().any(|(id, _, _)| *id == session.document_id())
-            || self.saves_in_flight.iter().any(|s| s.document == session.document_id())
-    }
-
-    pub(super) fn document_session_mut(&mut self, document: u64) -> Option<&mut Session> {
-        if self.session.document_id() == document {
-            return Some(&mut self.session);
-        }
-        self.tabs.iter_mut().flatten().find(|t| t.session.document_id() == document).map(|t| &mut t.session)
+        let Some(&id) = self.tab_ids.get(index) else { return false };
+        self.document_has_unsaved_work(id)
     }
 
     pub(super) fn tab_index(&self, p: &Value, field: &str) -> Result<usize, String> {
@@ -595,7 +622,7 @@ impl WordApp {
             .and_then(Value::as_u64)
             .and_then(|n| usize::try_from(n).ok())
             .ok_or_else(|| format!("{field} must be a nonnegative integer"))?;
-        if n >= self.tabs.len() {
+        if n >= self.tab_ids.len() {
             return Err("document tab index is out of range".into());
         }
         Ok(n)
@@ -617,7 +644,7 @@ impl WordApp {
                 if self.document_tabs().len() < 2 {
                     return Ok(json!({"changed": false}));
                 }
-                let n = self.tabs.len();
+                let n = self.tab_ids.len();
                 let index = (self.active_tab + if id == "ui.nextDocument" { 1 } else { n - 1 }) % n;
                 self.tab_command("ui.switchDocument", &json!({"index": index}), user)
             }
@@ -627,7 +654,7 @@ impl WordApp {
                 } else {
                     self.tab_index(p, "index")?
                 };
-                let targets: Vec<_> = (0..self.tabs.len())
+                let targets: Vec<_> = (0..self.tab_ids.len())
                     .filter(|&i| match id {
                         "ui.closeDocument" => i == index,
                         "ui.closeOtherDocuments" => i != index && !self.pinned_tabs[i],
@@ -667,7 +694,7 @@ impl WordApp {
             "ui.pinDocument" => {
                 let index = if user && p.get("id").is_none() && p.get("index").is_none() { self.active_tab } else { self.tab_index(p, "index")? };
                 let pinned = if user && p.get("pinned").is_none() {
-                    !self.pinned_tabs[index]
+                    !self.pinned_tabs.get(index).copied().ok_or("there is no document tab to pin")?
                 } else {
                     p.get("pinned").and_then(Value::as_bool).ok_or("pinned must be a boolean")?
                 };
@@ -685,8 +712,11 @@ impl WordApp {
                 Ok(json!({"active": self.active_tab}))
             }
             "ui.newWindow" => {
-                let launch = self.services.document_window.as_ref().ok_or("separate windows require the desktop host")?;
-                launch()?;
+                if let Some(launch) = &self.services.document_window {
+                    launch()?;
+                } else {
+                    self.new_window();
+                }
                 Ok(json!({"opened": true}))
             }
             _ => Err("unknown tab command".into()),
@@ -696,18 +726,12 @@ impl WordApp {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn enable_recovery(&mut self, root: std::path::PathBuf, wake: std::sync::Arc<dyn Fn() + Send + Sync>) -> Result<(), String> {
         self.session.enable_recovery(root.clone(), wake.clone())?;
-        for tab in self.tabs.iter_mut().flatten() {
-            tab.session.enable_recovery(root.clone(), wake.clone())?;
-        }
         self.recovery_config = Some((root, wake));
         Ok(())
     }
 
     pub fn finish_recovery(&mut self) {
         self.session.finish_recovery();
-        for tab in self.tabs.iter_mut().flatten() {
-            tab.session.finish_recovery();
-        }
     }
 }
 
@@ -726,11 +750,24 @@ const COMMANDS: &[(&str, &str, &str)] = &[
 ];
 
 pub(crate) fn commands(app: &WordApp) -> Vec<Value> {
+    let tabs = app.document_tabs();
+    let modal = app.document_modal();
     COMMANDS
         .iter()
         .map(|(id, label, params)| {
+            let enabled = match *id {
+                "ui.newWindow" => app.windows.native() || app.services.document_window.is_some(),
+                "ui.reopenClosedDocument" => !app.recently_closed.is_empty() && !modal,
+                "ui.switchDocument" => !tabs.is_empty() && !modal,
+                "ui.moveDocument" => tabs.len() > 1 && !modal,
+                "ui.nextDocument" | "ui.previousDocument" => tabs.len() > 1 && !modal,
+                "ui.closeDocument" | "ui.closeAllDocuments" => !tabs.is_empty() && !modal,
+                "ui.closeOtherDocuments" => tabs.iter().any(|tab| !tab.active && !tab.pinned) && !modal,
+                "ui.pinDocument" => !tabs.is_empty(),
+                _ => true,
+            };
             json!({"id": id, "label": label, "location": "Window",
-        "params": params, "enabled": *id != "ui.newWindow" || app.services.document_window.is_some(),
+        "params": params, "enabled": enabled,
         "shortcut": shortcut(app, id)})
         })
         .collect()
@@ -761,8 +798,104 @@ mod tests {
     fn app() -> WordApp {
         WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default())
     }
+    fn command_enabled(app: &WordApp, id: &str) -> bool {
+        commands(app).iter().find(|command| command["id"] == id).is_some_and(|command| command["enabled"].as_bool() == Some(true))
+    }
     fn edit(a: &mut WordApp, text: &str) {
         a.run("text.insert", json!({"text": text})).unwrap();
+    }
+
+    #[test]
+    fn command_search_enablement_tracks_the_available_tabs() {
+        let mut a = app();
+        a.start_screen();
+        for id in [
+            "ui.closeDocument",
+            "ui.closeOtherDocuments",
+            "ui.closeAllDocuments",
+            "ui.pinDocument",
+            "ui.switchDocument",
+            "ui.moveDocument",
+            "ui.nextDocument",
+            "ui.previousDocument",
+            "ui.reopenClosedDocument",
+        ] {
+            assert!(!command_enabled(&a, id), "{id} must be disabled with no tabs");
+        }
+        assert!(a.execute("ui.pinDocument", json!({})).is_err(), "pinning an empty workspace returns an error");
+
+        a.run("file.new", json!({})).unwrap();
+        assert!(command_enabled(&a, "ui.closeDocument"));
+        assert!(command_enabled(&a, "ui.closeAllDocuments"));
+        assert!(command_enabled(&a, "ui.pinDocument"));
+        assert!(!command_enabled(&a, "ui.closeOtherDocuments"));
+        assert!(!command_enabled(&a, "ui.nextDocument"));
+        assert!(!command_enabled(&a, "ui.previousDocument"));
+
+        a.run("file.new", json!({})).unwrap();
+        assert!(command_enabled(&a, "ui.closeOtherDocuments"));
+        assert!(command_enabled(&a, "ui.nextDocument"));
+        assert!(command_enabled(&a, "ui.previousDocument"));
+        a.dialog = Some(dialogs::Dialog::SaveChanges {
+            name: "Document".into(),
+            then: "file.close".into(),
+            params: json!({}),
+            document: a.session.document_id(),
+            message: String::new(),
+        });
+        assert!(!command_enabled(&a, "ui.closeDocument"));
+        assert!(!command_enabled(&a, "ui.nextDocument"));
+    }
+
+    #[test]
+    fn closing_the_last_tab_releases_the_standin_untitled_name() {
+        let mut a = app();
+        assert_eq!(a.document_tabs()[0].name, "Document1");
+        a.close_active_tab_now().unwrap();
+        a.run("file.new", json!({})).unwrap();
+        assert_eq!(a.document_tabs()[0].name, "Document2");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn workspace_skips_non_unicode_paths_instead_of_restoring_a_lossy_name() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let mut a = app();
+        a.session.path = Some(std::path::PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/wordcraft-\xff.docx".to_vec())));
+        let snapshot = a.workspace_snapshot();
+        assert!(snapshot.tabs[0].path.is_none());
+        assert!(snapshot.tabs[0].unrestorable_path);
+
+        let mut restored = app();
+        restored.ui.workspace = serde_json::from_value(serde_json::to_value(snapshot).unwrap()).unwrap();
+        assert_eq!(restored.restore_workspace(), 0);
+        assert_eq!(restored.document_tabs().len(), 1, "keep the initial blank document");
+        assert!(restored.status_msg.as_ref().is_some_and(|(message, _)| message.contains("not valid Unicode")));
+
+        let old_tab: WorkspaceTab = serde_json::from_value(json!({"path": null, "pinned": true})).unwrap();
+        assert!(!old_tab.unrestorable_path, "older preferences default the marker to false");
+    }
+
+    #[test]
+    fn direct_close_document_refuses_an_inactive_unconfirmed_save() {
+        let mut a = app();
+        a.empty_window();
+        a.run("file.new", json!({})).unwrap();
+        let document = a.session.document_id();
+        let saves = async_saves::AsyncSaves::default();
+        let started = saves.clone();
+        a.services.async_saves = Some(saves);
+        a.services.download = Some(Box::new(move |_, _| {
+            started.start();
+            Ok(())
+        }));
+        edit(&mut a, "pending save");
+        a.run("file.save", json!({"path": "pending.docx"})).unwrap();
+        a.run("file.new", json!({})).unwrap();
+
+        assert!(a.execute("file.closeDocument", json!({"id": document})).is_err());
+        assert!(a.session.is_open(document));
     }
 
     #[test]
@@ -782,6 +915,21 @@ mod tests {
         assert!(a.execute("ui.closeAllDocuments", json!({})).is_err());
         assert!(a.execute("ui.confirmQuitTab", json!({})).is_err());
         assert_eq!(a.document_tabs().len(), 2);
+    }
+
+    #[test]
+    fn move_tab_availability_respects_the_pinned_group_boundary() {
+        let mut a = app();
+        a.run("file.new", json!({})).unwrap();
+        a.run("file.new", json!({})).unwrap();
+        assert!(a.pin_document_tab(1, true));
+        a.run("file.new", json!({})).unwrap();
+
+        assert!(!a.can_move_document_tab(0, 1));
+        assert!(!a.can_move_document_tab(1, 0));
+        assert!(a.can_move_document_tab(1, 2));
+        assert!(a.can_move_document_tab(2, 1));
+        assert!(!a.can_move_document_tab(2, usize::MAX));
     }
 
     #[test]
@@ -805,6 +953,7 @@ mod tests {
         let mut a = app();
         a.start_screen();
         assert!(a.document_tabs().is_empty());
+        assert!(a.workspace_snapshot().tabs.is_empty(), "Start's blank placeholder is not a restored tab");
         a.run("file.new", json!({})).unwrap();
         assert_eq!(a.document_tabs().len(), 1);
         a.restrict.open = true;
@@ -815,6 +964,22 @@ mod tests {
         assert!(a.workspace_snapshot().tabs.is_empty());
         a.run("file.new", json!({})).unwrap();
         assert_eq!(a.document_tabs().len(), 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn closed_document_history_keeps_native_non_unicode_paths() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let mut a = app();
+        let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(b"/tmp/wordcraft-closed-\xff.docx".to_vec()));
+        a.session.path = Some(path.clone());
+        assert!(a.document_tab_path(0).is_none(), "Copy Full Path must not copy an unresolvable replacement name");
+        a.run("file.close", json!({})).unwrap();
+
+        assert_eq!(a.recently_closed.last().map(|closed| closed.path.as_path()), Some(path.as_path()));
+        assert!(a.reopen_closed_document_tab().is_err(), "a missing file reports the error and stays in history");
+        assert_eq!(a.recently_closed.last().map(|closed| closed.path.as_path()), Some(path.as_path()));
     }
 
     #[test]
@@ -852,6 +1017,26 @@ mod tests {
         a.run("file.new", json!({})).unwrap();
         assert_eq!(a.prefs().initials, "TA");
         assert!(!a.prefs().editing.check_spelling);
+    }
+
+    #[test]
+    fn pending_export_does_not_mark_a_clean_tab_dirty() {
+        let saves = async_saves::AsyncSaves::default();
+        let hook = saves.clone();
+        let services = Services {
+            download: Some(Box::new(move |_, _| {
+                hook.start();
+                Ok(())
+            })),
+            async_saves: Some(saves),
+            ..Default::default()
+        };
+        let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), services);
+        a.run("file.exportPdf", json!({})).unwrap();
+        assert!(!a.document_tabs()[0].dirty);
+        assert!(!a.any_dirty_documents());
+        assert!(a.close_requested(), "an export does not require Save Changes");
+        assert!(a.dialog.is_none());
     }
 
     #[test]
@@ -927,34 +1112,31 @@ impl WordApp {
     pub(super) fn tick_recovery(&mut self, ctx: &egui::Context) {
         let pending = std::mem::take(&mut self.pending_restores);
         for (document, revision, params) in pending {
-            if let Some(session) = self.document_session_mut(document) {
+            if !self.session.is_open(document) {
+                continue;
+            }
+            let result = self.session.with_document(document, |session| {
                 if session.rev() != revision {
-                    self.status(tl!("Recovery cancelled: the document changed while the copy was loading."));
-                    continue;
+                    return Some(Err("Recovery cancelled: the document changed while the copy was loading.".to_string()));
                 }
                 if session.recovery_ready() && !session.recovery_busy() {
-                    if let Err(error) = session.run("file.recover", &params) {
-                        self.status(error.to_string());
-                    }
+                    Some(session.run("file.recover", &params).map(|_| ()).map_err(|e| e.to_string()))
                 } else {
-                    self.pending_restores.push((document, revision, params));
+                    None
                 }
+            });
+            match result {
+                Ok(Some(Ok(()))) => {}
+                Ok(Some(Err(error))) => self.status(error),
+                Err(error) => self.status(error.to_string()),
+                Ok(None) => self.pending_restores.push((document, revision, params)),
             }
         }
         self.session.recovery_tick();
-        for tab in self.tabs.iter_mut().flatten() {
-            tab.session.recovery_tick();
-        }
-        let waits: Vec<_> = self.tabs.iter().flatten().filter_map(|t| t.session.recovery_wait()).collect();
-        for wait in waits {
+        if let Some(wait) = self.session.recovery_wait() {
             ctx.request_repaint_after(wait);
         }
-        if let Some(error) = self
-            .session
-            .recovery_error()
-            .map(str::to_string)
-            .or_else(|| self.tabs.iter().flatten().find_map(|t| t.session.recovery_error().map(str::to_string)))
-        {
+        if let Some(error) = self.session.recovery_error().map(str::to_string) {
             self.status(error);
         }
     }
@@ -1063,7 +1245,14 @@ mod close_and_save_tests {
         a.run("file.new", json!({})).unwrap();
         a.run("text.insert", json!({"text": "second"})).unwrap();
         a.run("ui.closeAllDocuments", json!({})).unwrap();
-        assert_eq!(a.document_tabs().len(), 2, "the clean tab closed first");
+        assert_eq!(
+            a.document_tabs().len(),
+            2,
+            "the clean tab closed first; tabs={:?}, dialog={:?}, pending={:?}",
+            a.document_tabs(),
+            a.dialog,
+            a.pending_closes
+        );
         a.run("ui.saveChanges", json!({"answer": "cancel"})).unwrap();
         assert!(a.pending_closes.is_empty() && !a.quit_requested);
         assert!(a.document_tabs().iter().all(|t| !t.pinned), "Close All also closed the clean pinned tab");
@@ -1090,6 +1279,81 @@ mod close_and_save_tests {
         a.run("file.open", json!({"path": path})).unwrap();
         assert_eq!(a.document_tabs().len(), 2);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn opening_an_already_open_file_at_the_tab_limit_selects_its_tab() {
+        let root = std::env::temp_dir().join(format!("wordcraft-tab-limit-open-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("original.docx");
+        let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+        a.run("text.insert", json!({"text": "original"})).unwrap();
+        a.run("file.save", json!({"path": path})).unwrap();
+        let original = a.session.document_id();
+        for _ in 1..128 {
+            a.run("file.new", json!({})).unwrap();
+        }
+        assert_eq!(a.document_tabs().len(), 128);
+
+        let result = a.run("file.open", json!({"path": path})).unwrap();
+        assert_eq!(result["alreadyOpen"], true);
+        assert_eq!(result["id"], original);
+        assert_eq!(a.session.document_id(), original);
+        assert_eq!(a.document_tabs().len(), 128);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn opening_a_file_owned_by_another_window_does_not_add_a_129th_tab() {
+        let path = std::env::temp_dir().join(format!("wordcraft-foreign-window-tab-{}.docx", std::process::id()));
+        let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+        for _ in 1..128 {
+            a.run("file.new", json!({})).unwrap();
+        }
+        assert_eq!(a.document_tabs().len(), 128);
+        let original_window = a.windows.shown();
+        a.new_window();
+        a.run("file.new", json!({})).unwrap();
+        let foreign = a.session.document_id();
+        a.session.with_document(foreign, |session| session.path = Some(path.clone())).unwrap();
+        assert!(a.enter_window(original_window));
+
+        let result = a.run("file.open", json!({"path": path})).unwrap();
+
+        assert_eq!(result["alreadyOpen"], true);
+        assert!(a.tab_ids.contains(&foreign), "opening the document should route to its owning window");
+        assert_eq!(a.document_tabs().len(), 2, "the existing target window retains its own tabs");
+        assert!(a.other_windows().any(|window| window.tab_ids.len() == 128 && !window.tab_ids.contains(&foreign)));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn quit_reprompts_when_control_edits_a_document_already_reviewed() {
+        let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+        a.run("text.insert", json!({"text": "First"})).unwrap();
+        a.run("file.new", json!({})).unwrap();
+        a.run("text.insert", json!({"text": "Second"})).unwrap();
+
+        assert!(!a.close_requested());
+        a.run("ui.saveChanges", json!({"answer": "dontSave"})).unwrap();
+        let (reviewed, remaining) = match a.dialog {
+            Some(dialogs::Dialog::SaveChanges { document, .. }) => (a.quit_reviewed[0].0, document),
+            other => panic!("expected the next dirty document prompt, got {other:?}"),
+        };
+        assert_ne!(reviewed, remaining);
+
+        let (request, _) =
+            crate::control::ControlRequest::new("engine.execute", json!({"command": "text.insert", "params": {"text": " more"}, "doc": reviewed}));
+        let crate::control::Outcome::Done(reply) = crate::control::handle(&mut a, &egui::Context::default(), &request) else {
+            panic!("an addressed edit should return a normal control reply");
+        };
+        assert_eq!(reply["ok"], true, "the control channel can edit the other open document");
+
+        a.run("ui.saveChanges", json!({"answer": "dontSave"})).unwrap();
+        assert!(matches!(a.dialog, Some(dialogs::Dialog::SaveChanges { document, .. }) if document == reviewed));
+        assert!(!a.quit_requested, "Quit must ask again after a reviewed document changes");
+        a.run("ui.saveChanges", json!({"answer": "dontSave"})).unwrap();
+        assert!(a.quit_requested);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1146,7 +1410,7 @@ mod close_and_save_tests {
             a.settle_async_saves();
             saves.finish(save, outcome);
             a.settle_async_saves();
-            assert!(a.document_session_mut(document).unwrap().dirty);
+            assert!(a.session.with_document(document, |session| session.dirty).unwrap());
             assert!(!a.confirmed_saves.contains_key(&document));
             assert!(a.switch_document_tab(0));
             assert!(a.execute("file.close", json!({})).is_err());
@@ -1187,6 +1451,8 @@ impl WordApp {
         self.quit_original_tab = None;
         self.pending_closes.clear();
         self.pending_keep_tab = None;
+        self.closing_window = None;
+        self.finishing_pending_closes = false;
     }
 }
 
@@ -1217,6 +1483,142 @@ mod close_during_picker_tests {
     use super::*;
 
     #[test]
+    fn open_picker_uses_the_active_window_if_its_origin_was_closed() {
+        let mut app = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+        let origin = app.active_document_id();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let rx = std::cell::RefCell::new(Some(rx));
+        app.services.file_dialog = Some(Box::new(move |_| rx.borrow_mut().take().unwrap()));
+        app.ask_file(
+            file_dialogs::FileDialogRequest::Open { purpose: "document".into() },
+            file_dialogs::AfterPick::OpenDocument { document: origin },
+        );
+
+        app.close_active_tab_now().unwrap();
+        assert!(!app.session.is_open(origin));
+        let path = std::env::temp_dir().join(format!("wordcraft-picked-after-close-{}.txt", std::process::id()));
+        std::fs::write(&path, "picked document").unwrap();
+        tx.send(Ok(vec![path.to_string_lossy().into_owned()])).unwrap();
+        assert!(app.poll_file_dialog().unwrap().unwrap()["path"].as_str().is_some());
+        assert_eq!(app.session.path.as_ref(), Some(&path));
+        assert!(app.session.doc.plain_text(wordcraft_doc::StoryRef::Body).contains("picked document"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn inactive_save_as_waits_for_the_active_documents_confirmation() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let rx = std::cell::RefCell::new(Some(rx));
+        let services = Services { file_dialog: Some(Box::new(move |_| rx.borrow_mut().take().unwrap())), ..Default::default() };
+        let mut app = WordApp::new(Session::new(wordcraft_doc::Document::new()), services);
+        app.run("text.insert", json!({"text": "first document"})).unwrap();
+        let original = app.session.document_id();
+        assert!(matches!(app.save_as(file_dialogs::AfterSave::Nothing), file_dialogs::Asked::Pending));
+        app.run("file.new", json!({})).unwrap();
+        app.run("text.insert", json!({"text": "second document"})).unwrap();
+        let active = app.active_document_id();
+        app.run("file.close", json!({})).unwrap();
+        let dir = std::env::temp_dir().join(format!("wordcraft-deferred-save-{original}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("first.docx");
+        tx.send(Ok(vec![path.to_string_lossy().into_owned()])).unwrap();
+        assert!(app.poll_file_dialog().is_none());
+        assert!(app.file_dialog_open() && !path.exists());
+        assert!(matches!(app.dialog, Some(dialogs::Dialog::SaveChanges { .. })));
+        app.run("ui.saveChanges", json!({"answer": "cancel"})).unwrap();
+        assert_eq!(app.poll_file_dialog().unwrap().unwrap()["saved"], true);
+        assert_eq!(app.active_document_id(), active);
+        assert!(app.session.dirty && path.exists());
+        assert!(app.switch_document_tab(0));
+        assert_eq!(app.session.document_id(), original);
+        assert!(!app.session.dirty);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn busy_save_picker_cancels_quit_sequence_and_allows_retry() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let rx = std::cell::RefCell::new(Some(rx));
+        let services = Services { file_dialog: Some(Box::new(move |_| rx.borrow_mut().take().unwrap())), ..Default::default() };
+        let mut app = WordApp::new(Session::new(wordcraft_doc::Document::new()), services);
+        app.run("text.insert", json!({"text": "unsaved writing"})).unwrap();
+        app.run("ui.openFileDialog", json!({})).unwrap();
+        assert!(!app.close_requested());
+        app.run("ui.saveChanges", json!({"answer": "save"})).unwrap();
+        assert!(!app.closing_all && !app.quit_requested && app.session.dirty);
+        tx.send(Ok(Vec::new())).unwrap();
+        app.poll_file_dialog().unwrap().unwrap();
+        assert!(!app.close_requested());
+        assert!(matches!(app.dialog, Some(dialogs::Dialog::SaveChanges { .. })));
+    }
+
+    #[test]
+    fn cancelled_inactive_picker_does_not_report_an_error() {
+        let mut app = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+        let document = app.session.document_id();
+        app.change_picture_target = Some("old-image".into());
+        app.run("file.new", json!({})).unwrap();
+        let result = app.finish_pick(file_dialogs::AfterPick::Bound { document, after: Box::new(file_dialogs::AfterPick::Picture) }, None).unwrap();
+        assert_eq!(result["cancelled"], true);
+        assert!(app.status_msg.is_none());
+        assert_eq!(app.active_document_tab(), 1);
+        assert!(app.switch_document_tab(0));
+        assert!(app.change_picture_target.is_none());
+    }
+
+    #[test]
+    fn font_changes_invalidate_inactive_document_layouts() {
+        let mut app = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+        app.run("text.insert", json!({"text": "cached paragraph"})).unwrap();
+        let cached = app.session.layout();
+        app.run("file.new", json!({})).unwrap();
+        app.font_generation = wordcraft_fonts::FontDb::global().generation().wrapping_sub(1);
+        app.watch_fonts(&egui::Context::default());
+        assert!(app.switch_document_tab(0));
+        assert!(!std::sync::Arc::ptr_eq(&cached, &app.session.layout()));
+        assert!(app.session.dirty);
+    }
+
+    #[test]
+    fn inactive_save_as_failure_keeps_its_feedback_after_switching_back() {
+        let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+        a.run("text.insert", json!({"text": "unsaved writing"})).unwrap();
+        let document = a.session.document_id();
+        a.run("file.new", json!({})).unwrap();
+        let previous = a.active_document_id();
+        a.dialog = Some(dialogs::Dialog::Commands { query: "unapplied dialog draft".into(), swallow: false });
+        a.ui.backstage = true;
+        a.canvas.want_focus = false;
+        a.finish_pick(
+            file_dialogs::AfterPick::Bound {
+                document,
+                after: Box::new(file_dialogs::AfterPick::SaveAs { after: file_dialogs::AfterSave::Nothing, document }),
+            },
+            None,
+        )
+        .unwrap();
+        assert!(matches!(&a.dialog, Some(dialogs::Dialog::Commands { query, .. }) if query == "unapplied dialog draft"));
+        assert!(a.ui.backstage && !a.canvas.want_focus);
+        let path = std::env::temp_dir().join(format!("wordcraft-no-parent-{}", document)).join("absent").join("save.docx");
+        let result = a
+            .finish_pick(
+                file_dialogs::AfterPick::Bound {
+                    document,
+                    after: Box::new(file_dialogs::AfterPick::SaveAs { after: file_dialogs::AfterSave::Nothing, document }),
+                },
+                Some(path.to_string_lossy().into_owned()),
+            )
+            .unwrap();
+        assert_eq!(result["saved"], false);
+        assert_eq!(a.active_document_id(), previous);
+        assert!(matches!(&a.dialog, Some(dialogs::Dialog::Commands { query, .. }) if query == "unapplied dialog draft"));
+        assert!(a.ui.backstage && !a.canvas.want_focus);
+        assert!(a.status_msg.as_ref().is_some_and(|(message, _)| !message.is_empty()));
+        assert!(a.switch_document_tab(0));
+        assert!(a.session.dirty);
+    }
+
+    #[test]
     fn os_close_does_not_replace_a_pending_save_as_continuation() {
         let (tx, rx) = std::sync::mpsc::channel();
         let rx = std::cell::RefCell::new(Some(rx));
@@ -1229,6 +1631,7 @@ mod close_during_picker_tests {
         assert!(!a.close_requested());
         assert!(!a.close_requested());
         assert!(a.file_dialog_is_continuation() && a.dialog.is_none());
+        assert!(a.status_msg.as_ref().is_some_and(|(message, _)| message.contains("before closing")));
         assert!(!a.closing_all);
         tx.send(Ok(Vec::new())).unwrap();
         a.poll_file_dialog().unwrap().unwrap();
@@ -1382,6 +1785,24 @@ mod web_picker_review_tests {
             ..Default::default()
         };
         WordApp::new(Session::new(wordcraft_doc::Document::new()), services)
+    }
+
+    #[test]
+    fn inactive_web_picture_result_clears_only_its_owners_target() {
+        for cancelled in [false, true] {
+            let replies = Replies::default();
+            let mut app = browser_app(replies.clone());
+            app.change_picture_target = Some("old-image".into());
+            app.pick_picture();
+            app.run("file.new", json!({})).unwrap();
+            app.change_picture_target = Some("current-image".into());
+            let files = if cancelled { Vec::new() } else { vec![("image.png".into(), vec![1])] };
+            replies.borrow_mut().remove(0).send(files).unwrap();
+            app.poll_web_pick();
+            assert_eq!(app.change_picture_target.as_deref(), Some("current-image"));
+            assert!(app.switch_document_tab(0));
+            assert!(app.change_picture_target.is_none());
+        }
     }
 
     #[test]

@@ -309,6 +309,9 @@ fn home_page(app: &mut WordApp, ui: &mut Ui) {
             "Good evening"
         },
     );
+    if let Some((message, _)) = &app.status_msg {
+        ui.label(message);
+    }
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = vec2(18.0, 0.0);
         for (label, template) in TEMPLATES.into_iter().take(HOME_TEMPLATES) {
@@ -329,10 +332,10 @@ fn home_page(app: &mut WordApp, ui: &mut Ui) {
 fn new_page(app: &mut WordApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     heading(ui, "New");
-    if app.services.document_window.is_some() && ui.button(tl!("New Window")).clicked() {
+    if (app.windows.native() || app.services.document_window.is_some()) && ui.button(tl!("New Window")).clicked() {
         let _ = app.run("ui.newWindow", json!({}));
     }
-    let id = egui::Id::unique("backstage_template_search");
+    let id = app.window_id("backstage_template_search");
     let mut query = ui.ctx().data(|d| d.get_temp::<String>(id)).unwrap_or_default();
     let search = ui.add(egui::TextEdit::singleline(&mut query).hint_text(tl!("Search for templates")).desired_width(360.0));
     if search.changed() {
@@ -574,8 +577,8 @@ pub(crate) fn forget_save_as_error(ctx: &egui::Context) {
 
 /// Open a file from the Recent list. A file that can't be opened (deleted, moved, unreadable)
 /// leaves File open so the list can say why, rather than closing it on a greyed-out window.
-fn open_recent(app: &mut WordApp, path: &str) -> Result<(), String> {
-    app.run("file.open", json!({"path": path}))?;
+pub(crate) fn open_recent(app: &mut WordApp, path: &str) -> Result<(), String> {
+    app.open_file(path, None)?;
     app.ui.backstage = false;
     app.canvas.want_focus = true;
     Ok(())
@@ -583,6 +586,9 @@ fn open_recent(app: &mut WordApp, path: &str) -> Result<(), String> {
 
 fn open_page(app: &mut WordApp, ui: &mut Ui) {
     heading(ui, "Open");
+    if let Some((message, _)) = &app.status_msg {
+        ui.label(message);
+    }
     if ui.button(egui::RichText::new(tl!("Browse…")).font(medium(14.0))).clicked() {
         let _ = app.run("ui.openFileDialog", json!({}));
     }
@@ -730,6 +736,55 @@ mod tests {
 
     /// #1714: every side-menu item has its own icon, a drawn one (an unknown name would fall back
     /// to a tile with its first letter, the only icon here that draws text).
+    #[test]
+    fn failed_browser_read_is_visible_on_open_without_creating_a_document() {
+        use egui_kittest::kittest::Queryable;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let rx = std::cell::RefCell::new(Some(rx));
+        let services = Services { open_async: Some(Box::new(move |_| rx.borrow_mut().take().unwrap())), ..Default::default() };
+        let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), services);
+        app.start_screen();
+        app.run("ui.backstage", json!({"value": true, "page": "open"})).unwrap();
+        app.run("ui.openFileDialog", json!({})).unwrap();
+        let message = "Couldn't read unreadable.txt. The file was not opened.";
+        app.status(message);
+        tx.send(Vec::new()).unwrap();
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+            |ui, app: &mut WordApp| {
+                app.logic(&ui.ctx().clone());
+                app.ui(ui);
+            },
+            app,
+        );
+        h.run_steps(5);
+        assert!(h.state().ui.backstage && h.state().ui.backstage_page == "open");
+        assert!(h.state().document_tabs().is_empty());
+        assert!(!h.state().file_dialog_open());
+        h.get_by_label(message);
+    }
+
+    #[test]
+    fn workspace_restore_failure_is_visible_on_home() {
+        let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Services::default());
+        app.start_screen();
+        let message = "Couldn't reopen missing.docx";
+        app.status(message);
+        let fonts_installed = std::cell::Cell::new(false);
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+            |ui, app: &mut WordApp| {
+                if !fonts_installed.replace(true) {
+                    crate::theme::install_fonts(ui.ctx());
+                    return;
+                }
+                app.ui(ui);
+            },
+            app,
+        );
+        h.run_steps(3);
+        assert_eq!(h.state().ui.backstage_page, "home");
+        h.get_by_label(message);
+    }
+
     #[test]
     fn every_side_menu_item_has_a_drawn_icon() {
         let ctx = egui::Context::default();
@@ -1170,14 +1225,15 @@ mod tests {
         assert!(h.query_by_label("Report").is_some(), "the built-in templates stay");
 
         // The search covers both.
-        h.ctx.data_mut(|d| d.insert_temp(egui::Id::unique("backstage_template_search"), "memo".to_string()));
+        let search = h.state().window_id("backstage_template_search");
+        h.ctx.data_mut(|d| d.insert_temp(search, "memo".to_string()));
         h.run_steps(3);
         assert!(h.query_by_label("Team memo").is_some(), "search finds a personal template");
         assert!(h.query_by_label("Contract").is_none() && h.query_by_label("Report").is_none());
-        h.ctx.data_mut(|d| d.insert_temp(egui::Id::unique("backstage_template_search"), "zzz".to_string()));
+        h.ctx.data_mut(|d| d.insert_temp(search, "zzz".to_string()));
         h.run_steps(3);
         assert!(h.query_by_label("No templates match your search.").is_some());
-        h.ctx.data_mut(|d| d.insert_temp(egui::Id::unique("backstage_template_search"), String::new()));
+        h.ctx.data_mut(|d| d.insert_temp(search, String::new()));
         h.run_steps(3);
 
         h.get_by_label("Team memo").click();
@@ -1222,8 +1278,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&chosen);
     }
 
-    /// A personal template replaces the document like New does: unsaved changes are asked about
-    /// first, and nothing is replaced until that is answered.
+    /// A personal template opens a new document like New does: nothing is asked, and the
+    /// document with unsaved changes stays open beside it.
     #[test]
     fn a_personal_template_opens_a_tab_and_keeps_unsaved_changes() {
         let dir = personal_dir("dirty");

@@ -31,6 +31,12 @@ struct Line {
 }
 
 pub fn run(args: &[&str]) -> Result<(), String> {
+    if args.iter().filter(|arg| **arg == "--dpi").count() > 1 {
+        return Err("duplicate --dpi option".into());
+    }
+    if let Some(option) = args.iter().find(|arg| arg.starts_with("--") && !matches!(**arg, "--dpi" | "--private")) {
+        return Err(format!("unknown option: {option}"));
+    }
     let private = args.contains(&"--private");
     let dpi = match args.iter().position(|a| *a == "--dpi") {
         Some(i) => args.get(i + 1).and_then(|v| v.parse::<u32>().ok()).filter(|d| (36..=300).contains(d)).ok_or("--dpi takes 36..=300")?,
@@ -335,6 +341,22 @@ mod tests {
 
     fn gray(w: usize, h: usize, f: impl Fn(usize, usize) -> u8) -> Gray {
         Gray { w, h, px: (0..w * h).map(|i| f(i % w, i / w)).collect() }
+    }
+
+    #[test]
+    fn unknown_options_are_rejected_before_creating_output() {
+        let out = std::env::temp_dir().join(format!("wordcraft-visual-diff-unknown-{}", std::process::id()));
+        assert!(!out.exists());
+        let out = out.to_string_lossy().into_owned();
+        let error = run(&["ref.pdf", "test.pdf", &out, "--privte"]).unwrap_err();
+        assert_eq!(error, "unknown option: --privte");
+        assert!(!Path::new(&out).exists());
+    }
+
+    #[test]
+    fn duplicate_dpi_is_rejected_before_creating_output() {
+        let error = run(&["ref.pdf", "test.pdf", "unused-output", "--dpi", "100", "--dpi", "200"]).unwrap_err();
+        assert!(error.contains("duplicate --dpi"), "{error}");
     }
 
     #[test]

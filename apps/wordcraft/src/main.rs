@@ -65,8 +65,17 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
             ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(pos));
         }
+        // The geometry saved for the next start is the active window's.
         let prev = self.0.ui.window;
-        self.0.ui.window = WindowGeometry::track(prev, &window);
+        // Another document window's state is the one it last painted with: the host reports only
+        // the root window's for this frame.
+        let active = self.0.active_viewport();
+        let tracked = if active == egui::ViewportId::ROOT {
+            window
+        } else {
+            ctx.input_for(active, |i| RawWindowState::from_viewport(Some(i.viewport()), Some(i.viewport_rect())))
+        };
+        self.0.ui.window = WindowGeometry::track(prev, &tracked);
         // The first frame, once the monitor is known (as `take_rescue` waits for): maximize a
         // window that opened at its normal size so it never flashed on screen half-opened.
         let maximize = self.1.and_then(|g| g.maximize_after_open()).filter(|_| window.monitor_size.is_some());
@@ -76,9 +85,11 @@ impl eframe::App for App {
         if let Some(command) = maximize {
             ctx.send_viewport_cmd(command);
         }
-        // The window's close button: with unsaved changes, ask first (`WordApp::close_requested`).
+        // The window's close button: with other windows open only this window closes (the app
+        // handles that while drawing it); the last one quits, asking first about unsaved changes
+        // (`WordApp::close_requested`).
         let closing = ctx.input(|i| i.viewport().close_requested());
-        if closing && !self.0.close_requested() {
+        if closing && (self.0.closes_a_window() || !self.0.close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         } else if (closing || self.0.quit_requested) && !self.0.printing.busy() {
             // On macOS, letting eframe drop the window inside `-[NSApplication run]` aborts in
@@ -228,22 +239,24 @@ fn save_prefs(app: &WordApp) {
             log::warn!("preferences: cannot create {}: {e}", dir.display());
             return;
         }
-        let ui = match preferences_for_save(app, &p) {
-            Ok(ui) => ui,
-            Err(e) => {
-                log::warn!("preferences: cannot preserve workspace from {}: {e}", p.display());
-                return;
-            }
-        };
-        match serde_json::to_vec_pretty(&ui) {
-            Ok(bytes) => {
-                if let Err(e) = write_prefs(&p, &bytes) {
-                    log::warn!("preferences: cannot save {}: {e}", p.display());
-                }
-            }
-            Err(e) => log::warn!("preferences: cannot serialize: {e}"),
+        if let Err(e) = save_preferences(app, &p) {
+            log::warn!("preferences: cannot save {}: {e}", p.display());
         }
     }
+}
+
+fn preferences_lock(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let lock_path = path.with_extension("lock");
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(lock_path)?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+fn save_preferences(app: &WordApp, path: &std::path::Path) -> std::io::Result<()> {
+    let _lock = preferences_lock(path)?;
+    let ui = preferences_for_save(app, path)?;
+    let bytes = serde_json::to_vec_pretty(&ui).map_err(std::io::Error::other)?;
+    write_prefs(path, &bytes)
 }
 
 /// Secondary windows keep the primary window's latest saved workspace, not their startup copy.
@@ -446,6 +459,8 @@ fn main() -> eframe::Result {
     #[cfg(target_os = "macos")]
     graphics::configure_indirect_validation(&mut options, graphics::skips_indirect_validation(true, cfg!(target_arch = "x86_64")));
     load_user_fonts();
+    // Windows opened for further documents start like the first one, before its saved place.
+    let window_builder = options.viewport.clone();
     let restored = saved_window();
     if let Some(window) = restored {
         options.viewport = window.apply(options.viewport);
@@ -499,6 +514,7 @@ fn main() -> eframe::Result {
                 }
             }
             app.ui.window = restored;
+            app.set_window_builder(window_builder);
             app.integrated_titlebar = cfg!(target_os = "macos");
             #[cfg(target_os = "macos")]
             if let Some(bar) = traffic_lights::title_bar() {
@@ -614,7 +630,7 @@ mod tests {
 
 #[cfg(test)]
 mod prefs_tests {
-    use super::write_prefs;
+    use super::{preferences_lock, save_preferences, write_prefs};
 
     #[test]
     fn secondary_window_preserves_the_latest_primary_workspace() {
@@ -645,6 +661,51 @@ mod prefs_tests {
         std::fs::remove_file(&path).unwrap();
         assert!(super::preferences_for_save(&secondary, &path).unwrap().workspace.tabs.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn secondary_save_waits_for_the_primary_workspace_write() {
+        use std::sync::mpsc;
+        use wordcraft_ui_egui::{Services, UiState, WordApp};
+        let dir = std::env::temp_dir().join(format!("wordcraft-secondary-prefs-race-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ui.json");
+
+        let mut initial = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Services::default());
+        initial.run("file.new", serde_json::json!({})).unwrap();
+        let stale = initial.prefs();
+        write_prefs(&path, &serde_json::to_vec(&stale).unwrap()).unwrap();
+
+        let mut primary = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Services::default());
+        primary.run("file.new", serde_json::json!({})).unwrap();
+        primary.run("file.new", serde_json::json!({})).unwrap();
+        primary.pin_document_tab(0, true);
+        let latest = primary.prefs();
+        let expected_workspace = primary.workspace_snapshot();
+
+        let lock = preferences_lock(&path).unwrap();
+        let worker_path = path.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut secondary = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Services::default());
+            secondary.apply_prefs(stale);
+            secondary.persist_workspace = false;
+            secondary.session.author = "Secondary window author".into();
+            started_tx.send(()).unwrap();
+            done_tx.send(save_preferences(&secondary, &worker_path).map_err(|e| e.to_string())).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(done_rx.recv_timeout(std::time::Duration::from_millis(100)).is_err(), "secondary save must wait for the preferences lock");
+        write_prefs(&path, &serde_json::to_vec(&latest).unwrap()).unwrap();
+        drop(lock);
+        done_rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap().unwrap();
+        worker.join().unwrap();
+
+        let saved = UiState::from_json(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(serde_json::to_value(saved.workspace).unwrap(), serde_json::to_value(expected_workspace).unwrap());
+        assert_eq!(saved.author, "Secondary window author");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

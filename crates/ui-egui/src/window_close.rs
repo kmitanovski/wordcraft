@@ -107,6 +107,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn closing_save_prompt_caption_cancels_quit_and_close_all() {
+        for quit in [true, false] {
+            let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+            app.run("text.insert", json!({"text": "first draft"})).unwrap();
+            app.run("file.new", json!({})).unwrap();
+            app.run("text.insert", json!({"text": "second draft"})).unwrap();
+            if quit {
+                let close_allowed = app.close_requested();
+                assert!(!close_allowed && app.closing_all);
+            } else {
+                app.run("ui.closeAllDocuments", json!({})).unwrap();
+            }
+            assert!(matches!(app.dialog, Some(crate::dialogs::Dialog::SaveChanges { .. })));
+            let expected_tab = app.active_document_id();
+            let mut h = harness(app);
+            h.run_steps(4);
+            click_close_box(&mut h, egui::Id::unique(("dialog", "WordCraft")));
+            let app = h.state_mut();
+            assert!(app.dialog.is_none());
+            assert!(!app.closing_all && !app.quit_requested);
+            assert!(app.pending_closes.is_empty() && app.pending_keep_tab.is_none());
+            assert!(app.quit_reviewed.is_empty() && app.quit_original_tab.is_none());
+            assert_eq!(app.active_document_id(), expected_tab);
+            assert_eq!(app.document_tabs().len(), 2);
+            if quit {
+                assert!(!app.close_requested());
+            } else {
+                app.run("ui.closeAllDocuments", json!({})).unwrap();
+            }
+            assert!(matches!(app.dialog, Some(crate::dialogs::Dialog::SaveChanges { .. })));
+        }
+    }
+
     /// The box fills the title bar's height inside the frame line and is as wide as the
     /// geometry says, flush with the window's right edge.
     #[test]

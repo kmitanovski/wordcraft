@@ -6,11 +6,11 @@ Forward-looking plan. The summary is [`ROADMAP.md`](../ROADMAP.md); the ranked w
 [`gaps.md`](gaps.md); the numbers are in [`target-app-parity.md`](target-app-parity.md). Hours are
 Opus 5.5 agent wall-clock.
 
-## Document workspace update (2026-10-25)
+## Document workspace update (2026-10-26)
 
 M10 now supports browser-style document tabs, workspace restoration and an explicit
 New Window. Recovery runs for active and inactive documents. See
-[document-tabs.md](document-tabs.md) for verification and remaining platform checks.
+[document-tabs-validation.md](document-tabs-validation.md) for verification and remaining platform checks.
 This does not close the Side by Side/Arrange All gaps or change readiness estimates.
 
 ## Current focus (toward beta, ~150–230 h)
