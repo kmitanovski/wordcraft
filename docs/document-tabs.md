@@ -1,6 +1,6 @@
 # Document tabs
 
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (browser picker isolation and follow-up review fixes) · **Target:** WordCraft desktop and web
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (browser picker dismissal and save-authority review fixes) · **Target:** WordCraft desktop and web
 
 New, Open, templates, Recent and dropped documents use the current window. Opening a
 saved file already open in that window selects its tab. The Start screen's placeholder
@@ -121,10 +121,19 @@ Adapted from these local, fetched revisions; no upstream changes were published:
 Cross-window editing synchronization, tab tear-off and tab groups are deferred.
 See [document-tabs-validation.md](document-tabs-validation.md) for verification evidence.
 
+A successful export never confirms an editable-document save. Selecting an already
+open file by dropping it preserves that tab's existing AutoSave authority.
+
+Browser file pickers also finish on the next page click or keypress after dismissal
+when the browser emits neither `change` nor `cancel`. The input and its listeners
+are removed before another request. Without transient user activation, a visible
+native file input remains available for manual selection.
+
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | Browser picker dismissal, Escape, export/save confirmation and drop AutoSave safeguards |
 | 2026-10-26 | minor | Quit retry, dictionary persistence, effective editing language and keyboard recording review fixes |
 | 2026-10-26 | minor | PR review fixes: secondary-window workspace preservation, Start preference, dialog guards, search and dirty reporting |
 | 2026-10-26 | major | Tabs adapted with document-bound saves, pickers, recovery, drafts, guarded closes and workspace restoration |

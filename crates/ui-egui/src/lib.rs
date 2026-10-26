@@ -1571,11 +1571,10 @@ impl WordApp {
                 let save = self.saves_in_flight.swap_remove(i);
                 match &outcome {
                     async_saves::SaveOutcome::Saved => {
-                        if self.document_session_mut(save.document).is_some() {
+                        if save.marked_saved && self.document_session_mut(save.document).is_some() {
                             let confirmed = self.confirmed_saves.entry(save.document).or_default();
                             *confirmed = (*confirmed).max(save.rev);
-                            if save.marked_saved
-                                && let Some(session) = self.document_session_mut(save.document)
+                            if let Some(session) = self.document_session_mut(save.document)
                                 && session.rev() == save.rev
                             {
                                 session.dirty = false;
@@ -2599,7 +2598,6 @@ impl WordApp {
             };
         }
         if self.session.document_id() != before {
-            self.autosave_path = None;
             self.dialog = None;
             self.ui.backstage = false;
             self.canvas.want_focus = true;

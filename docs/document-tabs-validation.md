@@ -1,6 +1,6 @@
 # Document tabs verification
 
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (browser picker ownership, Quit, preferences and Codex review gate)
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (browser picker dismissal fallback)
 
 Implementation and source revisions: [document-tabs.md](document-tabs.md).
 
@@ -48,17 +48,61 @@ against the specification and repository rules, including the browser host callb
 It reported no actionable defects. That was a source review; test/build results are
 recorded separately below. Eight new regressions cover the confirmed issues.
 
+## Browser dismissal follow-up
+
+The open CodeRabbit comment `discussion_r4373049046` is confirmed: rfd's browser
+picker can remain unresolved when dismissal produces neither change nor cancel.
+The web host now uses a request-owned native file input. Change/cancel complete it
+normally; the next page pointerdown/keydown is a fallback after silent dismissal.
+The fallback reads the selected FileList rather than assuming cancellation, so a
+late change event cannot discard selected files. No elapsed-time timeout can cancel
+an unhurried selection. Dropping the selection removes the input and all listeners.
+When transient user activation is absent, the native input remains visible and
+focused for manual selection. Request-specific result channels are unchanged.
+
+`apps/wordcraft-web/examples/picker_check.rs` exercises the actual picker module.
+Build it with `cargo build -p wordcraft-web --example picker_check --target
+wasm32-unknown-unknown`, then run wasm-bindgen (matching Cargo.lock) with `--target
+web` and serve its output. Browser automation can call the exported async
+`pick_files(many)`, supplying files through the generated `input[type=file]`.
+The exported `check_dismissal()` self-check verifies empty results and input cleanup
+for change, cancel, pointerdown and keydown. Suppress native input clicks in automation
+when deliberately testing silent dismissal.
+
+Regression cases: normal change and cancel; Escape on a focused visible input;
+suppress both events and return to the page with a pointerdown or keydown; suppress change with a selected FileList;
+multiple files; no user activation; repeated requests; removed old inputs cannot
+complete a new request. Check the file input and listeners are removed each time.
+
+The full-PR Codex source review also identified an export completing before a failed
+editable-document save incorrectly confirming that revision. Only lossless document
+saves now advance confirmed save authority. A failing-then-passing regression covers
+cancellation and failure while the owning tab is inactive and verifies direct close
+still refuses its unsaved work. The same review identified the focused input's Escape
+path, now covered by the browser harness.
+
+CodeRabbit's summary concern about a drop selecting an existing tab was also
+reproduced: drop cleanup cleared that tab's restored AutoSave authorization. File open
+already owns save-authority initialization, so the redundant drop reset was removed.
+Its regression preserves the existing tab's identity, dirty edits and AutoSave authority.
+
 ## Quality gate
 
 `cargo xtask ci` passed all eight stages locally: formatting, workspace Clippy with
 warnings denied, workspace tests, translation audit, doctests, asset attribution,
 dependency layering and the 16-crate WASM check. The workspace test stage passed
-4409 tests after follow-up remediation (4395 after upstream reconciliation; 4196 on
+4411 tests after follow-up remediation (4395 after upstream reconciliation; 4196 on
 the original integration base). Existing ignored benchmarks remain ignored. A separate
 `cargo check -p wordcraft-web --target wasm32-unknown-unknown` also passed, covering the
-browser host code omitted from the standard 16-crate WASM gate. Browser picker behavior
-was tested through native channel-based regressions; a real browser picker interaction
-was not executed in this follow-up.
+browser host code omitted from the standard 16-crate WASM gate. The actual Rust/WASM
+picker module passed 29 headless Chromium runtime checks plus its four exported
+dismissal self-checks, including selected FileLists,
+normal change/cancel, Escape, suppressed-event dismissal through pointer and keyboard,
+selection before a late change, multi-select, absent activation, stale inputs and 20
+repeated cycles. Each completion removed the input and all four registered listeners.
+The visible fallback input screenshot was inspected. Native OS picker dismissal was
+simulated by suppressing change/cancel; manual OS-dialog interaction, Safari/Firefox
+and Windows/Linux native behavior were not tested in this follow-up.
 The translation audit passed; the detailed missing-translation report was unavailable
 because this local build has no `CRAFT_I18N_DIR` catalog checkout.
 
@@ -151,6 +195,7 @@ asset, layering and quality-gate requirements without claiming that unavailable 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | Browser dismissal/Escape and save-authority review fixes; Chromium runtime harness and Codex review verified |
 | 2026-10-26 | minor | Cover interrupted Quit, dictionary persistence, editing language and keyboard recording; require Codex review before pushing |
 | 2026-10-26 | minor | PR review regressions cover secondary-window workspace ownership, Start disabled, modal scope, search and dirty callbacks |
 | 2026-10-26 | major | Record tab safety regressions, process-termination recovery and screenshot inspection |

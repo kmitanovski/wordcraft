@@ -1092,6 +1092,68 @@ mod close_and_save_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn dropping_an_open_file_keeps_its_existing_autosave_authority() {
+        #[derive(Debug)]
+        struct Dropped(std::path::PathBuf);
+        impl egui::DroppedFile for Dropped {
+            fn path(&self) -> &std::path::Path {
+                &self.0
+            }
+            fn bytes(&self) -> Result<Vec<u8>, String> {
+                std::fs::read(&self.0).map_err(|e| e.to_string())
+            }
+        }
+        let root = std::env::temp_dir().join(format!("wordcraft-drop-authority-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("original.docx");
+        let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+        a.run("text.insert", json!({"text": "saved"})).unwrap();
+        a.run("file.save", json!({"path": path})).unwrap();
+        let document = a.session.document_id();
+        a.run("text.insert", json!({"text": "unsaved edit"})).unwrap();
+        a.run("file.new", json!({})).unwrap();
+        a.open_dropped_files(vec![std::sync::Arc::new(Dropped(path.clone()))]);
+        assert_eq!(a.session.document_id(), document);
+        assert_eq!(a.autosave_path.as_ref(), Some(&path));
+        assert!(a.autosaves());
+        assert!(a.session.dirty);
+        assert!(a.session.doc.plain_text(wordcraft_doc::StoryRef::Body).contains("unsaved edit"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_successful_export_does_not_confirm_a_failed_document_save() {
+        for outcome in [async_saves::SaveOutcome::Cancelled, async_saves::SaveOutcome::Failed("disk full".into())] {
+            let saves = async_saves::AsyncSaves::default();
+            let hook = saves.clone();
+            let services = Services {
+                download: Some(Box::new(move |_, _| {
+                    hook.start();
+                    Ok(())
+                })),
+                async_saves: Some(saves.clone()),
+                ..Default::default()
+            };
+            let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), services);
+            a.run("text.insert", json!({"text": "unsaved writing"})).unwrap();
+            let document = a.session.document_id();
+            let save = a.run("file.save", json!({})).unwrap()["pendingSave"].as_u64().unwrap();
+            let export = a.run("file.exportPdf", json!({})).unwrap()["pendingSave"].as_u64().unwrap();
+            a.run("file.new", json!({})).unwrap();
+            saves.finish(export, async_saves::SaveOutcome::Saved);
+            a.settle_async_saves();
+            saves.finish(save, outcome);
+            a.settle_async_saves();
+            assert!(a.document_session_mut(document).unwrap().dirty);
+            assert!(!a.confirmed_saves.contains_key(&document));
+            assert!(a.switch_document_tab(0));
+            assert!(a.execute("file.close", json!({})).is_err());
+            assert_eq!(a.document_tabs().len(), 2);
+        }
+    }
+
     #[test]
     fn late_failure_of_an_older_save_does_not_unsave_a_confirmed_newer_revision() {
         let saves = async_saves::AsyncSaves::default();

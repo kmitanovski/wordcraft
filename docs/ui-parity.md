@@ -1,6 +1,6 @@
 # UI parity with Microsoft Word
 
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (Document tabs interrupted-Quit retry protection) · **Target:** Microsoft Word (Microsoft 365) for Mac 16.113.4
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (browser picker dismissal and save-authority review fixes) · **Target:** Microsoft Word (Microsoft 365) for Mac 16.113.4
 
 Recovery discovery no longer interrupts an explicitly created or opened document. Older copies remain in File › Recover, whose buttons use the interface palette. See [local recovery](recovery.md).
 
@@ -80,6 +80,10 @@ Footnote and endnote editing keeps body and note text at normal opacity, on ligh
 
 ## Document tabs
 
+Browser file pickers accept the next page click or keypress as a dismissal fallback
+when no change/cancel event arrives. A selected batch still belongs to its original
+request; the input and listeners are cleaned up before a later request.
+
 A forced automation close during Quit cancels that review; subsequent close operations
 prompt for all remaining dirty tabs again, including previously reviewed documents.
 
@@ -95,6 +99,7 @@ unsaved tabs. See [document-tabs.md](document-tabs.md) for commands, safety and 
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | Browser picker dismissal/Escape, export/save confirmation and duplicate-drop AutoSave safeguards |
 | 2026-10-26 | minor | Browser picker ownership, Quit retries, dictionary persistence, effective proofing language and keyboard recording regressions fixed after review. Readiness estimates unchanged. |
 | 2026-10-26 | minor | Document tabs, explicit New Window and document-bound safety. See [document-tabs.md](document-tabs.md). |
 | 2026-10-25 | trivial | Custom Document Properties dialog: File › Info › Properties › Advanced Properties… opens it; the document's custom properties listed with Add, Modify and Delete over a name/value form (text properties only; Word's number/date/yes-no types not offered), OK one undoable `file.properties` step, Cancel discards; modal dialogs 62 → 63 (#2982) |

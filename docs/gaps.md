@@ -1,7 +1,7 @@
 # Where WordCraft falls short of Word
 
 > **Highlight update:** 2026-10-25 · Highlight shortcut toggles the last chosen colour off when the whole selection has it; explicit colour commands remain setters (#4085). Readiness estimates unchanged.
-> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (Interrupted-Quit tab close fixed; platform field validation remains) · **Target:** Microsoft Word (Microsoft 365) for Mac 16.113.4
+> **Last reviewed:** 2026-10-26 · **Last updated:** 2026-10-26 · **Change:** minor (browser picker dismissal and save-authority review fixes) · **Target:** Microsoft Word (Microsoft 365) for Mac 16.113.4
 
 Recovery discovery no longer interrupts an explicitly created or opened document. Older copies remain in File › Recover, whose buttons use the interface palette. See [local recovery](recovery.md).
 
@@ -138,6 +138,9 @@ Small follow-ups from the 2026-10-25 field, table and AutoFormat batch (#4232):
 - AutoFormat's `*bold*` and `_italic_` don't convert when a closing bracket or quote follows the closing mark (`(*see note*)`): the trigger checks only space and `,.;:!?` (#4098).
 - The ribbon's Accept and Reject buttons only open their menus; Word's main half runs Accept (Reject) and Move to Next. The ribbon needs a big split button (Paste needs one too) (#4205).
 
+Browser picker dismissal without a change/cancel event is handled on the next page
+interaction; broader native-platform field validation remains open.
+
 ## Revision history
 
 > 2026-10-23 · cu20we review follow-up: Only paragraph-relative box floats use the pre-spacing origin. Line-relative floats and page/margin fallbacks in cells and text boxes keep the text-top origin. Synthetic controls compare zero and 24 pt space-before across all four box contexts. New cap conversion helpers and regression tests document their contracts; readiness estimates unchanged.
@@ -148,6 +151,7 @@ Small follow-ups from the 2026-10-25 field, table and AutoFormat batch (#4232):
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | Browser picker dismissal, export/save confirmation and duplicate-drop AutoSave safeguards; platform field validation remains open |
 | 2026-10-26 | minor | Browser picker ownership, Quit retries, dictionary persistence, effective proofing language and keyboard recording regressions fixed after review. Readiness estimates unchanged. |
 | 2026-10-26 | minor | Document tabs and recovery isolation; platform field validation remains. See [document-tabs.md](document-tabs.md). |
 | 2026-10-25 | trivial | egui 0.37 migration: interface catalogs remain pinned by `craft-i18n.rev` (`9205108…`; 27 languages, English fallback); IME surrounding deletions and composition resets are implemented with regressions, but managed CI passed; native IME acceptance and native-speaker catalog review remain open; no gap or readiness change |
