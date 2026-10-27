@@ -171,7 +171,7 @@ impl WordApp {
         self.session
             .documents()
             .into_iter()
-            .filter(|doc| doc.id != id)
+            .filter(|doc| doc.id != id && self.tab_ids.contains(&doc.id))
             .filter_map(|doc| doc.path)
             .any(|other| other.as_path() == std::path::Path::new(path) || (wanted.is_some() && std::fs::canonicalize(&other).ok() == wanted))
     }

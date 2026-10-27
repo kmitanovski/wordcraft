@@ -393,6 +393,11 @@ impl WordApp {
     pub(crate) fn other_window_on_document(&self) -> Option<u64> {
         let shown = self.windows.shown;
         let doc = self.windows.get(shown)?.doc;
+        self.other_window_showing_document(doc)
+    }
+
+    pub(crate) fn other_window_showing_document(&self, doc: u64) -> Option<u64> {
+        let shown = self.windows.shown;
         if !self.windows.native {
             return None;
         }
@@ -1380,6 +1385,86 @@ mod tests {
         assert_eq!(prompt(&a), Some("saveChanges"));
         a.run("ui.saveChanges", json!({"answer": "dontSave"})).unwrap();
         assert!(a.quit_requested, "one prompt for the document");
+    }
+
+    #[test]
+    fn closing_a_shared_dirty_document_tab_does_not_refuse_or_prompt() {
+        let ctx = backend();
+        let mut a = app("Kept");
+        let document = a.session.document_id();
+        frames(&ctx, &mut a, 2);
+        a.run("view.newWindow", json!({})).unwrap();
+        let other = a.other_window_on_document().unwrap();
+
+        assert!(a.run("file.close", json!({})).is_ok());
+
+        assert_eq!(prompt(&a), None);
+        assert!(a.session.is_open(document));
+        assert!(a.session.with_document(document, |s| s.dirty).unwrap(), "the shared edits remain unsaved");
+        assert!(a.windows.get(other).is_some_and(|w| w.ui.as_ref().is_some_and(|ui| ui.tab_ids.contains(&document))));
+    }
+
+    #[test]
+    fn closing_a_shared_last_tab_keeps_the_document_and_releases_the_standin_name() {
+        let ctx = backend();
+        let mut a = app("Kept");
+        let shared = a.session.document_id();
+        frames(&ctx, &mut a, 2);
+        a.run("view.newWindow", json!({})).unwrap();
+        let other = a.other_window_on_document().unwrap();
+        a.run("file.close", json!({})).unwrap();
+        assert!(!a.has_document());
+
+        a.run("file.new", json!({})).unwrap();
+
+        assert_eq!(a.document_tabs().first().map(|tab| tab.name.as_str()), Some("Document2"));
+        assert!(a.session.is_open(shared), "opening a new tab must not discard the other window's document");
+        assert!(a.session.with_document(shared, |s| s.dirty && s.doc.plain_text(StoryRef::Body).contains("Kept")).unwrap());
+        assert!(a.windows.get(other).is_some_and(|w| w.ui.as_ref().is_some_and(|ui| ui.tab_ids.contains(&shared))));
+    }
+
+    #[test]
+    fn an_empty_window_does_not_claim_another_windows_document_as_its_placeholder() {
+        let ctx = backend();
+        let mut a = app("Shared");
+        let shared = a.session.document_id();
+        a.session.with_document(shared, |s| s.dirty = false).unwrap();
+        frames(&ctx, &mut a, 2);
+        a.run("view.newWindow", json!({})).unwrap();
+        let local = a.windows.shown();
+        let owner = a.other_window_on_document().unwrap();
+        a.run("file.new", json!({})).unwrap();
+        a.run("ui.closeDocument", json!({"id": shared})).unwrap();
+        a.run("file.close", json!({})).unwrap();
+
+        assert_ne!(a.no_document, Some(shared));
+        assert!(a.session.is_open(shared));
+        assert!(a.windows.get(owner).is_some_and(|w| w.ui.as_ref().is_some_and(|ui| ui.tab_ids.contains(&shared))));
+
+        a.show_window(owner);
+        a.run("file.close", json!({})).unwrap();
+        assert!(!a.session.is_open(shared), "closing its only real tab must close the document");
+        assert!(a.windows.get(local).is_some());
+    }
+
+    #[test]
+    fn save_as_can_use_a_path_open_in_a_different_window() {
+        let ctx = backend();
+        let path = docx_on_disk("cross-window-save", "Owner");
+        let mut a = app("Owner");
+        a.run("file.save", json!({"path": path.to_string_lossy()})).unwrap();
+        let owner = a.session.document_id();
+        frames(&ctx, &mut a, 2);
+        a.run("view.newWindow", json!({})).unwrap();
+        let other = a.other_window_on_document().unwrap();
+        a.run("file.new", json!({})).unwrap();
+        a.run("ui.closeDocument", json!({"id": owner})).unwrap();
+
+        let result = a.run("file.saveAs", json!({"path": path.to_string_lossy()}));
+
+        assert!(result.is_ok(), "a different window may use this path: {result:?}");
+        assert!(a.windows.get(other).is_some_and(|w| w.ui.as_ref().is_some_and(|ui| ui.tab_ids.contains(&owner))));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
     #[test]

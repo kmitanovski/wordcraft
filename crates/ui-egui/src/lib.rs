@@ -1248,7 +1248,9 @@ impl WordApp {
         if document_tabs::is_tab_command(id) {
             return self.tab_command(id, &params, false);
         }
-        if let Some(e) = control::close_refused(self, id, &params) {
+        if !self.closes_only_its_window(id, &params)
+            && let Some(e) = control::close_refused(self, id, &params)
+        {
             return Err(e.into());
         }
         // A pending Change Picture only survives until the next action (#147).
@@ -8504,7 +8506,7 @@ mod tests {
 
     /// Review finding: an agent's Undo while a prompt about the mailing result B was up must not
     /// bring document A back under B, where Don't Save would throw A away. The result is its
-    /// own document: Undo stays in B, and Don't Save closes B and shows A, unsaved work intact.
+    /// own document: Undo stays in B, and Don't Save closes B while preserving A's unsaved work.
     #[test]
     fn undo_after_a_mailing_cannot_redirect_a_pending_prompt() {
         for id in MAILINGS {
@@ -8522,8 +8524,10 @@ mod tests {
             assert_eq!(a.session.document_id(), b, "{id}");
             a.run("ui.saveChanges", json!({"answer": "dontSave"})).unwrap();
             assert!(!a.session.is_open(b), "{id}: Don't Save closed the document it asked about");
-            assert_eq!(a.session.document_id(), first, "{id}");
-            assert!(body_text(&a).contains(UNSAVED) && a.session.dirty, "{id}");
+            assert!(
+                a.session.with_document(first, |s| s.dirty && s.doc.plain_text(wordcraft_doc::StoryRef::Body).contains(UNSAVED)).unwrap(),
+                "{id}: Don't Save must preserve A's unsaved work"
+            );
         }
     }
 

@@ -300,6 +300,7 @@ impl WordApp {
         let picked = picked.map(|p| p.to_string_lossy().into_owned());
         if let Err(e) = self.finish_pick(b.after, picked) {
             log::warn!("file browser: {e}");
+            self.status(e);
         }
         self.canvas.want_focus = true;
     }
@@ -578,6 +579,22 @@ mod tests {
         assert!(!a.session.dirty);
         let saved = wordcraft_engine::io::open_path(&dir.join("novel.docx")).unwrap();
         assert!(saved.plain_text(wordcraft_doc::StoryRef::Body).contains("Saved without a portal"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn closed_save_as_in_the_built_in_browser_reports_failure() {
+        let dir = scratch("closed-save");
+        let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+        a.browse_builtin("save");
+        let document = a.session.document_id();
+
+        a.run("file.close", json!({})).unwrap();
+        assert!(!a.session.is_open(document));
+        a.close_file_browser(Some(dir.join("chapter.docx")));
+
+        assert!(a.status_msg.as_ref().is_some_and(|(message, _)| message.contains("document for this save has been closed")));
+        assert!(!dir.join("chapter.docx").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

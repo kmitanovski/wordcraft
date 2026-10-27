@@ -304,7 +304,7 @@ impl WordApp {
                 if matches!(*after, AfterPick::Picture) {
                     self.clear_picture_target_for_document(document);
                 }
-                if picked.is_none() && !matches!(*after, AfterPick::SaveAs { .. }) {
+                if picked.is_none() && (!matches!(*after, AfterPick::SaveAs { .. }) || !self.session.is_open(document)) {
                     return Ok(json!({"cancelled": true}));
                 }
                 if !matches!(*after, AfterPick::SaveAs { .. }) {
@@ -1097,6 +1097,19 @@ mod tests {
         a.open_dialog();
         assert_eq!(shown.borrow().len(), 1, "a new dialog once the first was answered");
         assert_eq!(shown.borrow()[0].0, FileDialogRequest::Open { purpose: "document".into() });
+    }
+
+    #[test]
+    fn cancelling_save_as_after_its_document_closed_is_quiet() {
+        let (mut a, shown) = async_app();
+        a.save_as_dialog();
+        let document = a.session.document_id();
+        a.run("file.close", json!({})).unwrap();
+        assert!(!a.session.is_open(document));
+
+        answer(&shown, None);
+        assert_eq!(a.poll_file_dialog().unwrap().unwrap(), json!({"cancelled": true}));
+        assert!(a.status_msg.is_none(), "cancelling does not report a failed save");
     }
 
     /// #2313: Export PDF from the command search (no path given) asks where to save it, as the

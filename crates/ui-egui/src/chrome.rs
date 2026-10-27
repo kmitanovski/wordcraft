@@ -767,12 +767,7 @@ impl WordApp {
 pub fn document_tabs(app: &mut WordApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let current = (app.active_document_id(), app.active_document_tab());
-    let reveal_active = ui.ctx().data_mut(|data| {
-        let key = egui::Id::unique("last_drawn_document_tab");
-        let changed = data.get_temp::<(u64, usize)>(key) != Some(current);
-        data.insert_temp(key, current);
-        changed
-    });
+    let reveal_active = tab_reveal_changed(ui.ctx(), app.windows.shown(), current);
     egui::Panel::top("document_tabs")
         .exact_size(35.0)
         .frame(egui::Frame::NONE.fill(t.tab_strip).inner_margin(egui::Margin { left: 8, right: 8, top: 3, bottom: 2 }))
@@ -935,6 +930,15 @@ pub fn document_tabs(app: &mut WordApp, ui: &mut Ui) {
         });
 }
 
+fn tab_reveal_changed(ctx: &egui::Context, window: u64, current: (u64, usize)) -> bool {
+    ctx.data_mut(|data| {
+        let key = egui::Id::unique(("last_drawn_document_tab", window));
+        let changed = data.get_temp::<(u64, usize)>(key) != Some(current);
+        data.insert_temp(key, current);
+        changed
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -951,6 +955,14 @@ mod tests {
         *n += 1;
         let input = egui::RawInput { time: Some(f64::from(*n) / 60.0), predicted_dt: 1.0 / 60.0, events, ..Default::default() };
         ctx.run_ui(input, |ui| title_bar(a, ui)).drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn tab_reveal_state_does_not_cross_native_windows() {
+        let ctx = ctx();
+        assert!(tab_reveal_changed(&ctx, 1, (10, 0)));
+        assert!(tab_reveal_changed(&ctx, 2, (20, 0)));
+        assert!(!tab_reveal_changed(&ctx, 1, (10, 0)), "drawing another window must not reset this one");
     }
 
     fn click(ctx: &egui::Context, n: &mut u32, pos: egui::Pos2, a: &mut WordApp) {

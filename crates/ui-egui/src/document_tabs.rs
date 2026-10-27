@@ -358,9 +358,12 @@ impl WordApp {
             self.tab_ids.remove(self.active_tab);
             self.pinned_tabs.remove(self.active_tab);
             if self.tab_ids.is_empty() {
-                self.no_document = Some(closed_id);
+                let placeholder = self.session.add_document(self.session.blank_document());
+                self.session.release_untitled_name();
+                self.no_document = Some(placeholder);
                 self.active_tab = 0;
                 self.canvas = Default::default();
+                self.sync_tab_document();
             } else {
                 let index = self.active_tab.min(self.tab_ids.len() - 1);
                 self.session.activate(self.tab_ids[index]).map_err(|e| e.to_string())?;
@@ -384,7 +387,12 @@ impl WordApp {
             .filter_map(|id| previous.iter().position(|candidate| candidate == id).and_then(|i| self.pinned_tabs.get(i).copied()))
             .collect();
         if self.tab_ids.is_empty() {
-            self.no_document = Some(self.session.document_id());
+            let placeholder = if self.other_window_showing_document(self.session.document_id()).is_some() {
+                self.session.add_document(self.session.blank_document())
+            } else {
+                self.session.document_id()
+            };
+            self.no_document = Some(placeholder);
             self.session.release_untitled_name();
             self.canvas = Default::default();
             self.comment_drafts = Default::default();
